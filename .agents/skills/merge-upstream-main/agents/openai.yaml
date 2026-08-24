@@ -1,0 +1,4 @@
+interface:
+  display_name: "Merge Upstream Main"
+  short_description: "Merge upstream main into the current fork"
+  default_prompt: "Use $merge-upstream-main to merge the canonical upstream main branch into this fork and push the result."
