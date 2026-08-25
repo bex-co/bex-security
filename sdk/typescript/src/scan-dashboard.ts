@@ -2,6 +2,7 @@ import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import type { ScanModelConfiguration } from "./config.js";
+import { tokenUsage, type ScanTokenUsage } from "./cost-model.js";
 import type {
   ComponentReceipt,
   ComponentScanEvent,
@@ -53,6 +54,7 @@ interface ScanDashboardOptions {
   componentName?: string;
   mode?: ScanMode;
   model?: ScanModelConfiguration;
+  usageAtCompletion?: boolean;
   maxCostUsd?: number;
   clock: DashboardClock;
   color?: boolean;
@@ -127,6 +129,9 @@ export class ScanDashboard {
   #stage = "Preparing scan";
   #files: ScanProgress | null = null;
   #publicationProgress: { completed: number; total: number } | null = null;
+  #model: ScanModelConfiguration | undefined;
+  #usage: ScanTokenUsage | null = null;
+  #usageStatus: "waiting" | "completion" | "available" | "unavailable";
   #cost: Readonly<ScanCost> | null = null;
   #timer: NodeJS.Timeout | null = null;
   #scrollOffset = 0;
@@ -196,6 +201,9 @@ export class ScanDashboard {
   public constructor(stream: DashboardStream, options: ScanDashboardOptions) {
     this.#stream = stream;
     this.#options = options;
+    this.#model = options.model;
+    this.#usageStatus =
+      options.usageAtCompletion === true ? "completion" : "waiting";
     this.#startedAt = options.clock.now();
   }
 
@@ -368,6 +376,31 @@ export class ScanDashboard {
 
   public setCost(cost: Readonly<ScanCost>): void {
     this.#cost = cost;
+    this.#usageStatus = "available";
+    this.#usage = {
+      input_tokens: cost.inputTokens,
+      cached_input_tokens: cost.cachedInputTokens,
+      cache_write_input_tokens: cost.cacheWriteInputTokens,
+      output_tokens: cost.outputTokens,
+      reasoning_output_tokens: 0,
+      total_tokens: cost.inputTokens + cost.outputTokens,
+    };
+    this.#refresh();
+  }
+
+  public setModel(model: ScanModelConfiguration): void {
+    this.#model = model;
+    this.#refresh();
+  }
+
+  public finishUsage(usage: unknown): void {
+    const normalized = tokenUsage(usage);
+    if (normalized !== null) {
+      this.#usage = normalized;
+      this.#usageStatus = "available";
+    } else if (this.#usage === null) {
+      this.#usageStatus = "unavailable";
+    }
     this.#refresh();
   }
 
@@ -493,14 +526,22 @@ export class ScanDashboard {
         ? "waiting for inventory"
         : `${formatCount(this.#files.filesCompleted)} / ${formatCount(this.#files.filesTotal)} reviewed`;
     const tokens =
-      this.#cost === null
-        ? "waiting for usage"
-        : `${formatCount(this.#cost.inputTokens)} in · ${formatCount(this.#cost.cachedInputTokens)} cached · ${formatCount(this.#cost.outputTokens)} out`;
+      this.#usage === null
+        ? this.#usageStatus === "completion"
+          ? "usage unavailable until completion"
+          : this.#usageStatus === "unavailable"
+            ? "usage unavailable"
+            : "waiting for usage"
+        : `${formatCount(this.#usage.input_tokens)} in · ${formatCount(this.#usage.cached_input_tokens)} cached · ${formatCount(this.#usage.output_tokens)} out`;
     const cost =
       this.#cost === null
-        ? this.#options.maxCostUsd === undefined
-          ? "waiting for usage"
-          : `— / ${formatUsd(this.#options.maxCostUsd)}`
+        ? `${
+            this.#usageStatus === "completion"
+              ? "cost unavailable until completion"
+              : this.#usageStatus === "unavailable" || this.#usage !== null
+                ? "cost unavailable"
+                : "waiting for usage"
+          }${this.#options.maxCostUsd === undefined ? "" : ` · — / ${formatUsd(this.#options.maxCostUsd)}`}`
         : `${formatUsd(this.#cost.estimatedUsd)}${this.#options.maxCostUsd === undefined ? "" : ` / ${formatUsd(this.#options.maxCostUsd)} · ${budgetBar(this.#cost.estimatedUsd, this.#options.maxCostUsd)}`}`;
 
     const history = this.#activityLines(width);
@@ -532,10 +573,10 @@ export class ScanDashboard {
     }
     if (this.#options.componentName !== undefined)
       scrollStatus = `Esc components · ${scrollStatus}`;
-    const model = this.#options.model;
+    const model = this.#model;
 
     const lines = [
-      `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
+      `  BEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
       divider,
       ...activity,
       divider,
@@ -703,7 +744,7 @@ export class ScanDashboard {
         : `${this.#componentResult.sourceFindingCount} findings → ${this.#componentResult.findingCount} groups${this.#componentResult.deduplication?.status === "incomplete" ? " · matching incomplete" : ""}`;
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     return this.#formatFrame([
-      `  CODEX SECURITY  ·  COMPONENTS  ·  ${basename(this.#options.repository)}`,
+      `  BEX SECURITY  ·  COMPONENTS  ·  ${basename(this.#options.repository)}`,
       divider,
       `  ${count("completed")} complete · ${count("started")} running · ${count("pending")} queued · ${count("incomplete")} incomplete · ${count("failed")} failed`,
       "",

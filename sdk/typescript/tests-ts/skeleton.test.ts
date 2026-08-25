@@ -335,5 +335,17 @@ describe("TypeScript package skeleton", () => {
     expect(scanHelpOutput.text()).toContain(
       "Usage: codex-security scan [repository]",
     );
+
+    const bexHelpOutput = capture();
+    expect(
+      await main(
+        [],
+        bexHelpOutput.stream,
+        stderr.stream,
+        undefined,
+        "bex-security",
+      ),
+    ).toBe(0);
+    expect(bexHelpOutput.text()).toContain("Usage: bex-security <command>");
   });
 });

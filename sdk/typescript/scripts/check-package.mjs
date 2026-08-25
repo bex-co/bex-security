@@ -101,6 +101,7 @@ const required = [
   "package/package.json",
   "package/README.md",
   "package/LICENSE",
+  "package/bin/bex-security.mjs",
   "package/bin/codex-security.mjs",
   "package/dist/index.js",
   "package/dist/index.d.ts",
@@ -157,6 +158,7 @@ const allowedRoot = new Set([
   "package/package.json",
   "package/README.md",
   "package/LICENSE",
+  "package/bin/bex-security.mjs",
   "package/bin/codex-security.mjs",
 ]);
 const distFiles = new Set(
@@ -234,13 +236,17 @@ if (
 ) {
   throw new Error("npm tarball contains an invalid tar entry.");
 }
-const launcherPermissions =
-  listingLines[entries.indexOf("package/bin/codex-security.mjs")]?.split(
-    /\s/u,
-    1,
-  )[0] ?? "";
-if ([3, 6, 9].some((index) => launcherPermissions[index] !== "x")) {
-  throw new Error("npm package CLI launcher is not executable.");
+for (const launcherPath of [
+  "package/bin/bex-security.mjs",
+  "package/bin/codex-security.mjs",
+]) {
+  const launcherPermissions =
+    listingLines[entries.indexOf(launcherPath)]?.split(/\s/u, 1)[0] ?? "";
+  if ([3, 6, 9].some((index) => launcherPermissions[index] !== "x")) {
+    throw new Error(
+      `npm package CLI launcher is not executable: ${launcherPath}.`,
+    );
+  }
 }
 const packageJson = JSON.parse(
   archiveFile("package/package.json").toString("utf8"),

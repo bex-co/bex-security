@@ -395,19 +395,17 @@ try {
     "Installed package must contain its declared CLI launcher.",
   );
 
-  const shim = join(
-    consumer,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "codex-security.cmd" : "codex-security",
-  );
-  assert.equal(
-    (await stat(shim)).isFile(),
-    true,
-    "npm must create the published codex-security executable shim.",
-  );
+  function installedShim(commandName) {
+    return join(
+      consumer,
+      "node_modules",
+      ".bin",
+      process.platform === "win32" ? `${commandName}.cmd` : commandName,
+    );
+  }
 
-  function runInstalledCli(argument) {
+  function runInstalledCli(commandName, argument) {
+    const shim = installedShim(commandName);
     const options = { cwd: consumer, capture: true };
     if (process.platform === "win32") {
       return run(
@@ -420,12 +418,24 @@ try {
     return run(shim, [argument], options);
   }
 
-  const version = runInstalledCli("--version");
-  assert.equal(version.trim(), packageManifest.version);
+  for (const commandName of ["bex-security", "codex-security"]) {
+    assert.equal(
+      typeof installedManifest.bin?.[commandName],
+      "string",
+      `Installed package must declare the ${commandName} launcher.`,
+    );
+    assert.equal(
+      (await stat(installedShim(commandName))).isFile(),
+      true,
+      `npm must create the published ${commandName} executable shim.`,
+    );
+    const version = runInstalledCli(commandName, "--version");
+    assert.equal(version.trim(), packageManifest.version);
 
-  const help = runInstalledCli("--help");
-  assert.match(help, /Usage: codex-security\b/u);
-  assert.match(help, /\bpublish\b/u);
+    const help = runInstalledCli(commandName, "--help");
+    assert.match(help, new RegExp(`Usage: ${commandName}\\b`, "u"));
+    assert.match(help, /\bpublish\b/u);
+  }
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

@@ -15,6 +15,7 @@ import {
   type RequestPermissionRequest,
   type ResumeSessionResponse,
   type SessionConfigOption,
+  type SetSessionConfigOptionResponse,
   type SessionUpdate,
   type Usage,
 } from "@agentclientprotocol/sdk";
@@ -26,6 +27,7 @@ import type {
   TurnOptions,
 } from "@openai/codex-sdk";
 import type { AcpAgentName } from "./config.js";
+import type { ScanModelConfiguration } from "./config.js";
 import { VERSION } from "./version.js";
 
 export interface AcpAgentSelection {
@@ -128,6 +130,7 @@ export class AcpAgentThread {
   readonly #agentPath: string | undefined;
   #id: string | null = null;
   #configuration: SessionConfiguration = {};
+  #modelConfiguration: ScanModelConfiguration | null = null;
 
   public constructor(
     codexOptions: CodexOptions,
@@ -144,6 +147,10 @@ export class AcpAgentThread {
 
   public get id(): string | null {
     return this.#id;
+  }
+
+  public get modelConfiguration(): ScanModelConfiguration | null {
+    return this.#modelConfiguration;
   }
 
   public async runStreamed(
@@ -288,9 +295,7 @@ export class AcpAgentThread {
             sessionConfiguration.configOptions ??
             this.#configuration.configOptions,
         };
-        this.#configuration = sessionConfiguration;
-        queue.push({ type: "thread.started", thread_id: sessionId });
-        await configureSession(
+        this.#modelConfiguration = await configureSession(
           agent,
           sessionId,
           this.#threadOptions,
@@ -298,6 +303,8 @@ export class AcpAgentThread {
           this.#selection,
           sessionConfiguration,
         );
+        this.#configuration = sessionConfiguration;
+        queue.push({ type: "thread.started", thread_id: sessionId });
         acceptUpdates = true;
         queue.push({ type: "turn.started" });
         const response = await agent.request(
@@ -469,7 +476,7 @@ async function configureSession(
   agentName: AcpAgentName,
   selection: AcpAgentSelection,
   configuration: SessionConfiguration,
-): Promise<void> {
+): Promise<ScanModelConfiguration | null> {
   if (agentName === "codex") {
     await agent.request(methods.agent.session.setMode, {
       sessionId,
@@ -489,29 +496,59 @@ async function configureSession(
         value: options.modelReasoningEffort,
       });
     }
-    return;
+    return options.model === undefined ||
+      options.modelReasoningEffort === undefined
+      ? null
+      : {
+          model: options.model,
+          reasoningEffort: options.modelReasoningEffort,
+        };
   }
 
-  const configOptions = configuration.configOptions ?? [];
-  await setConfigOption(agent, sessionId, configOptions, "mode", "default");
+  let configOptions: readonly SessionConfigOption[] =
+    configuration.configOptions ?? [];
+  configOptions = (
+    await setConfigOption(agent, sessionId, configOptions, "mode", "default")
+  ).options;
   if (selection.model !== undefined) {
-    await setConfigOption(
-      agent,
-      sessionId,
-      configOptions,
-      "model",
-      selection.model,
-    );
+    configOptions = (
+      await setConfigOption(
+        agent,
+        sessionId,
+        configOptions,
+        "model",
+        selection.model,
+      )
+    ).options;
   }
   if (selection.reasoningEffort !== undefined) {
-    await setConfigOption(
-      agent,
-      sessionId,
-      configOptions,
-      "thought_level",
-      selection.reasoningEffort,
-    );
+    configOptions = (
+      await setConfigOption(
+        agent,
+        sessionId,
+        configOptions,
+        "thought_level",
+        selection.reasoningEffort,
+      )
+    ).options;
   }
+  const model = selectedConfigValue(configOptions, "model");
+  const reasoningEffort = selectedConfigValue(configOptions, "thought_level");
+  return model === null || reasoningEffort === null
+    ? null
+    : { model, reasoningEffort };
+}
+
+function selectedConfigValue(
+  options: readonly SessionConfigOption[],
+  category: string,
+): string | null {
+  const option = options.find((candidate) => candidate.category === category);
+  return option?.type === "select" ? option.currentValue : null;
+}
+
+interface SetConfigOptionResult {
+  options: readonly SessionConfigOption[];
 }
 
 async function setConfigOption(
@@ -522,7 +559,7 @@ async function setConfigOption(
   options: readonly SessionConfigOption[],
   category: string,
   requested: string,
-): Promise<void> {
+): Promise<SetConfigOptionResult> {
   const option = options.find((candidate) => candidate.category === category);
   if (option === undefined || option.type !== "select") {
     throw new Error(`ACP agent does not offer a ${category} configuration.`);
@@ -540,12 +577,25 @@ async function setConfigOption(
       `ACP agent does not offer ${category} value ${JSON.stringify(requested)}. Available values: ${choices.map(({ value }) => value).join(", ")}.`,
     );
   }
-  if (selected.value === option.currentValue) return;
-  await agent.request(methods.agent.session.setConfigOption, {
+  if (selected.value === option.currentValue) {
+    return { options };
+  }
+  const response = (await agent.request(methods.agent.session.setConfigOption, {
     sessionId,
     configId: option.id,
     value: selected.value,
-  });
+  })) as SetSessionConfigOptionResponse;
+  const updated = response.configOptions;
+  return {
+    options:
+      updated.length === 0
+        ? options.map((candidate) =>
+            candidate === option
+              ? { ...candidate, currentValue: selected.value }
+              : candidate,
+          )
+        : updated,
+  };
 }
 
 function permissionResponse(request: RequestPermissionRequest): {

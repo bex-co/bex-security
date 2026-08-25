@@ -26,6 +26,7 @@
     }
   },
   "bin": {
+    "bex-security": "./bin/bex-security.mjs",
     "codex-security": "./bin/codex-security.mjs"
   },
   "files": [

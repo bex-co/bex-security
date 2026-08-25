@@ -1,8 +1,9 @@
 # `@openai/codex-security`
 
 Open-source TypeScript SDK and CLI for running Codex Security scans. The
-ESM-only package includes TypeScript declarations, the `codex-security`
-executable, and the matching Codex runtime.
+ESM-only package includes TypeScript declarations, the `bex-security` and
+`codex-security` executables, and the matching Codex runtime. Both executable
+names run the same CLI; `codex-security` remains available for compatibility.
 
 > [!NOTE]
 > This package follows semantic versioning. Its public API may change between

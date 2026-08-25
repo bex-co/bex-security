@@ -526,7 +526,7 @@ export function PatchTui({
     <Box flexDirection="column" height={Math.max(15, rows - 1)} paddingX={1}>
       <Box justifyContent="space-between" marginBottom={1}>
         <Text bold>
-          <Text color={accent}>CODEX SECURITY</Text>
+          <Text color={accent}>BEX SECURITY</Text>
           {"  "}
           {safeLine(basename(repository))}
         </Text>

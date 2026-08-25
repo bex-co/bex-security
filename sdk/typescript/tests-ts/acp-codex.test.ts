@@ -123,6 +123,10 @@ describe("Codex ACP adapter", () => {
     );
 
     expect(thread.id).toBe("thread-acp");
+    expect(thread.modelConfiguration).toEqual({
+      model: "sonnet",
+      reasoningEffort: "high",
+    });
     expect(completedMessage(events)).toBe("new:allow");
     expect(events.at(-1)?.type).toBe("turn.completed");
   });

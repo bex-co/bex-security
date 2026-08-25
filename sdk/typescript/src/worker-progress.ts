@@ -69,7 +69,14 @@ export function workerStatusFromEvent(
 export function scanProgressUpdatesFromEvent(
   event: Readonly<Record<string, unknown>>,
 ): ScanProgress[] {
-  if (event["type"] !== "item.completed" || !isRecord(event["item"])) {
+  if (
+    event["type"] !== "item.started" &&
+    event["type"] !== "item.updated" &&
+    event["type"] !== "item.completed"
+  ) {
+    return [];
+  }
+  if (!isRecord(event["item"])) {
     return [];
   }
   const item = event["item"];

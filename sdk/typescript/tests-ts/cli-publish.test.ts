@@ -915,7 +915,7 @@ describe("publish scan", () => {
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
     expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
     expect(stripVTControlCharacters(stderr.text())).toContain(
-      "CODEX SECURITY  ·  PUBLISH  ·  second-repository",
+      "BEX SECURITY  ·  PUBLISH  ·  second-repository",
     );
     expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
     expect(stderr.text()).not.toContain("66666666-7777-8888-9999");
@@ -1151,7 +1151,7 @@ describe("publish scan", () => {
 
     const text = stripVTControlCharacters(stderr.text());
     expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
-    expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  completed-scan");
+    expect(text).toContain("BEX SECURITY  ·  PUBLISH  ·  completed-scan");
     expect(text).toContain("Checking the connected Linear project.");
     expect(text).toContain("linear_get_team");
     expect(text).toContain("Created SEC-123");
@@ -1690,7 +1690,7 @@ describe("publish scan", () => {
     expect(publishedDirectory).toBe(selectedDirectory);
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
     expect(stripVTControlCharacters(stderr.text())).toContain(
-      "CODEX SECURITY  ·  PUBLISH  ·  selected-scan",
+      "BEX SECURITY  ·  PUBLISH  ·  selected-scan",
     );
     expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
   });

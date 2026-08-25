@@ -9,7 +9,7 @@ import {
 
 let resumed = false;
 
-const configOptions = [
+let configOptions = [
   {
     id: "mode",
     name: "Mode",
@@ -58,9 +58,14 @@ const app = agent({ name: "bex-security-test-agent" })
     return { configOptions };
   })
   .onRequest(methods.agent.session.setMode, () => ({}))
-  .onRequest(methods.agent.session.setConfigOption, () => ({
-    configOptions: [],
-  }))
+  .onRequest(methods.agent.session.setConfigOption, ({ params }) => {
+    configOptions = configOptions.map((option) =>
+      option.id === params.configId
+        ? { ...option, currentValue: params.value }
+        : option,
+    );
+    return { configOptions };
+  })
   .onRequest(
     methods.agent.session.prompt,
     async ({ params, client, signal }) => {

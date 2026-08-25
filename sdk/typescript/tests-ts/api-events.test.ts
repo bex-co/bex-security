@@ -118,6 +118,31 @@ describe("one-shot scan events", () => {
     });
   });
 
+  test("reports the negotiated model and final usage", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const configurations: unknown[] = [];
+    const usages: unknown[] = [];
+
+    await runEvents(scanDir, completedEvents(), {
+      onModelConfiguration: (configuration) =>
+        configurations.push(configuration),
+      onUsage: (usage) => usages.push(usage),
+    });
+
+    expect(configurations).toEqual([
+      { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
+    ]);
+    expect(usages).toEqual([
+      {
+        input_tokens: 10,
+        cached_input_tokens: 2,
+        cache_write_input_tokens: 0,
+        output_tokens: 3,
+        reasoning_output_tokens: 1,
+      },
+    ]);
+  });
+
   test.each([null, undefined])(
     "preserves completed scans when the real Codex SDK receives %p token usage",
     async (usage) => {
@@ -1142,20 +1167,29 @@ describe("one-shot scan events", () => {
     async function* progressEvents(): AsyncGenerator<ThreadEvent> {
       yield { type: "thread.started", thread_id: "thread-1" };
       yield { type: "turn.started" };
-      for (const text of [
-        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}',
-        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"validation","filesCompleted":8,"filesTotal":8}',
-      ]) {
-        yield {
-          type: "item.completed",
-          item: {
-            id: `progress-${updates.length}`,
-            type: "agent_message",
-            text,
-          },
-        };
-      }
+      const started =
+        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}';
+      const updated = `${started}\nCODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}`;
+      yield {
+        type: "item.started",
+        item: { id: "progress", type: "agent_message", text: started },
+      };
+      yield {
+        type: "item.updated",
+        item: { id: "progress", type: "agent_message", text: updated },
+      };
+      yield {
+        type: "item.completed",
+        item: { id: "progress", type: "agent_message", text: updated },
+      };
+      yield {
+        type: "item.completed",
+        item: {
+          id: "validation-progress",
+          type: "agent_message",
+          text: 'CODEX_SECURITY_SCAN_PROGRESS {"phase":"validation","filesCompleted":8,"filesTotal":8}',
+        },
+      };
       yield {
         type: "turn.completed",
         usage: {

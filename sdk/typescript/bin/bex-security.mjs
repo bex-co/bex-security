@@ -1,14 +1,11 @@
 #!/usr/bin/env node
 async function launch() {
-  const [
-    { realpathSync },
-    { dirname, join },
-    { fileURLToPath, pathToFileURL },
-  ] = await Promise.all([
-    import("node:fs"),
-    import("node:path"),
-    import("node:url"),
-  ]);
+  const [{ realpathSync }, { dirname, join }, { pathToFileURL }] =
+    await Promise.all([
+      import("node:fs"),
+      import("node:path"),
+      import("node:url"),
+    ]);
   const entrypoint = process.argv[1];
   if (entrypoint === undefined) {
     throw new Error("Cannot resolve CLI entrypoint.");
@@ -20,7 +17,7 @@ async function launch() {
     process.stdout,
     process.stderr,
     undefined,
-    "codex-security",
+    "bex-security",
   );
 }
 
@@ -29,7 +26,7 @@ void launch().then(
     process.exitCode = exitCode;
   },
   () => {
-    process.stderr.write("codex-security: Failed to start Codex Security.\n");
+    process.stderr.write("bex-security: Failed to start Bex Security.\n");
     process.exitCode = 2;
   },
 );

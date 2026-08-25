@@ -52,6 +52,7 @@ import {
   type AcpAgentName,
   type CodexSecurityConfig,
   type JsonObject,
+  type ScanModelConfiguration,
   writeCodexConfig,
 } from "./config.js";
 import {
@@ -154,6 +155,7 @@ import {
 
 interface CodexThreadLike {
   readonly id: string | null;
+  readonly modelConfiguration?: ScanModelConfiguration | null;
   runStreamed(
     input: string,
     options: TurnOptions,
@@ -228,6 +230,8 @@ export interface ScanOptions extends DeepScanOptions {
   failureSeverity?: SeverityLevel;
   maxCostUsd?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
+  onModelConfiguration?: (configuration: ScanModelConfiguration) => void;
+  onUsage?: (usage: unknown) => void;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
@@ -325,10 +329,12 @@ export interface ScanWarningDetails {
 type ScanObserverName =
   | "onAuthentication"
   | "onCost"
+  | "onModelConfiguration"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanStarted"
   | "onTrustedAccessStatus"
+  | "onUsage"
   | "onReconnect"
   | "onActivity"
   | "onSessionEvent"
@@ -1311,6 +1317,8 @@ export class CodexSecurity {
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
+        onModelConfiguration: options.onModelConfiguration,
+        onUsage: options.onUsage,
         onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onActivity: options.onActivity,
@@ -2633,6 +2641,8 @@ interface ScanEventRunOptions {
   onFinalize?: (usage: unknown) => Promise<unknown>;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
+  onModelConfiguration?: (configuration: ScanModelConfiguration) => void;
+  onUsage?: (usage: unknown) => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onReconnect?: (
     attempt: number,
@@ -2652,6 +2662,7 @@ export async function runScanEvents(
 ): Promise<ScanResult> {
   let scanStarted = false;
   let tacStatusReported = false;
+  const reportedProgress = new Set<string>();
   try {
     const turn = await readCodexTurn({
       thread: options.thread,
@@ -2695,6 +2706,9 @@ export async function runScanEvents(
           ) {
             continue;
           }
+          const progressKey = `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
+          if (reportedProgress.has(progressKey)) continue;
+          reportedProgress.add(progressKey);
           notifyObserver(
             "onProgress",
             options.onProgress,
@@ -2712,6 +2726,15 @@ export async function runScanEvents(
           );
         }
         if (event.type === "thread.started") {
+          const modelConfiguration = options.thread.modelConfiguration;
+          if (modelConfiguration !== undefined && modelConfiguration !== null) {
+            notifyObserver(
+              "onModelConfiguration",
+              options.onModelConfiguration,
+              options.onObserverError,
+              modelConfiguration,
+            );
+          }
           const startedThreadId = event["thread_id"];
           if (typeof startedThreadId === "string") {
             await options.onThreadStarted?.(startedThreadId);
@@ -2750,6 +2773,7 @@ export async function runScanEvents(
           "Codex Security event stream ended before the turn completed.",
       );
     }
+    notifyObserver("onUsage", options.onUsage, options.onObserverError, usage);
     if (threadId === null) {
       throw new IncompleteScanError(
         "Codex Security did not report a thread ID.",

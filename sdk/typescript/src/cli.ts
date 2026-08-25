@@ -1399,6 +1399,7 @@ export async function main(
   output: Writable = process.stdout,
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
+  commandName: "bex-security" | "codex-security" = "codex-security",
 ): Promise<number> {
   argv = defaultListCommand(argv);
   const positionals: string[] = [];
@@ -2224,9 +2225,11 @@ export async function main(
       }
     },
   });
-  const cli = Cli.create("codex-security", {
+  const cli = Cli.create(commandName, {
     description:
-      "Run, validate, patch, verify fixes, export, and publish Codex Security findings.",
+      commandName === "bex-security"
+        ? "Run, validate, patch, verify fixes, export, and publish Bex Security findings."
+        : "Run, validate, patch, verify fixes, export, and publish Codex Security findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -5488,6 +5491,7 @@ async function executeScan(
           model: effectiveModel,
           reasoningEffort: effectiveReasoningEffort,
         },
+        usageAtCompletion: arguments_.agent === "claude",
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),
@@ -5560,6 +5564,16 @@ async function executeScan(
       expectedPluginVersion: arguments_.expectedPluginVersion,
       failureSeverity: arguments_.failOnSeverity,
       maxCostUsd: arguments_.maxCostUsd,
+      onModelConfiguration: (configuration) => {
+        effectiveModel = configuration.model;
+        effectiveReasoningEffort = configuration.reasoningEffort;
+        diagnostic("scan.model_configured", {
+          model: effectiveModel,
+          reasoning_effort: effectiveReasoningEffort,
+        });
+        dashboard?.setModel(configuration);
+      },
+      onUsage: (usage) => dashboard?.finishUsage(usage),
       onCost: (cost) => {
         diagnostic("cost.updated", {
           model: cost.model,

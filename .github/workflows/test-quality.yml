@@ -1,6 +1,6 @@
 name: test-quality
 
-on:
+"on":
   pull_request:
     paths:
       - .github/workflows/test-quality.yml

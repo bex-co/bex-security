@@ -39,11 +39,13 @@ type ScanEventOptions = Pick<
   | "authentication"
   | "expectedFilesTotal"
   | "onActivity"
+  | "onModelConfiguration"
   | "onObserverError"
   | "onProgress"
   | "onReconnect"
   | "onScanStarted"
   | "onTrustedAccessStatus"
+  | "onUsage"
   | "onWarning"
   | "onWorkerStatus"
 > & { abortController?: AbortController };
@@ -108,6 +110,10 @@ export function runEvents(
   return runScanEvents({
     thread: {
       id: null,
+      modelConfiguration: {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+      },
       async runStreamed() {
         return { events };
       },

@@ -18,7 +18,7 @@ function fakeClock(now: () => number = () => STARTED_AT) {
 
 function lastFrame(stderr: ReturnType<typeof capture>): string {
   return stripVTControlCharacters(stderr.text())
-    .split("CODEX SECURITY  ·  juice-shop")
+    .split("BEX SECURITY  ·  juice-shop")
     .at(-1)!;
 }
 
@@ -41,6 +41,32 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("shows negotiated Claude configuration and explicit usage availability", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(stderr.stream, {
+      repository: "/code/juice-shop",
+      model: { model: "default", reasoningEffort: "default" },
+      usageAtCompletion: true,
+      clock: fakeClock(),
+    });
+
+    dashboard.start();
+    let frame = lastFrame(stderr);
+    expect(frame).toContain("default (default)");
+    expect(frame).toContain("usage unavailable until completion");
+    expect(frame).toContain("cost unavailable until completion");
+
+    dashboard.setModel({ model: "sonnet", reasoningEffort: "high" });
+    dashboard.finishUsage(null);
+    frame = lastFrame(stderr);
+    dashboard.stop();
+
+    expect(frame).toContain("sonnet (high)");
+    expect(frame).toContain("TOKENS   usage unavailable");
+    expect(frame).toContain("COST     cost unavailable");
+    expect(frame).not.toContain("waiting for usage");
+  });
+
   test("shows concurrent components and keeps their activity and costs separate", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
@@ -243,7 +269,7 @@ describe("live scan dashboard", () => {
     dashboard.start();
     input.emit("data", "d");
     let text = stripVTControlCharacters(stderr.text());
-    expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  payments-api");
+    expect(text).toContain("BEX SECURITY  ·  PUBLISH  ·  payments-api");
     expect(text).toContain("Waiting for publication activity");
     expect(text).toContain("FINDINGS  waiting for findings");
     expect(text).not.toContain("FILES");
@@ -468,7 +494,7 @@ describe("live scan dashboard", () => {
     dashboard.stop();
 
     const text = stripVTControlCharacters(stderr.text());
-    expect(text).toContain("CODEX SECURITY  ·  juice-shop");
+    expect(text).toContain("BEX SECURITY  ·  juice-shop");
     expect(text).not.toContain("ACTIVITY");
     expect(text).not.toContain("events · live");
     expect(text).not.toContain("WORKERS");
@@ -1326,7 +1352,7 @@ describe("live scan dashboard", () => {
     });
 
     const raw = stderr.text();
-    expect(raw).toContain("\u001B[1m  CODEX SECURITY  ·  juice-shop\u001B[0m");
+    expect(raw).toContain("\u001B[1m  BEX SECURITY  ·  juice-shop\u001B[0m");
     expect(raw).toContain(
       "\u001B[2m  [09:41:00] ✓ rg -n password routes/login.ts\u001B[0m",
     );

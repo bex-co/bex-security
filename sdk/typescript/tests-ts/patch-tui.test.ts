@@ -95,7 +95,7 @@ describe("interactive patch finding browser", () => {
       }),
     );
 
-    expect(app.lastFrame()).toContain("CODEX SECURITY");
+    expect(app.lastFrame()).toContain("BEX SECURITY");
     expect(app.lastFrame()).toContain("FINDINGS");
     expect(app.lastFrame()).toContain("DETAILS");
     expect(app.lastFrame()).toContain("PATCH INSTRUCTIONS");

@@ -19,13 +19,34 @@ upstream security improvements.
 > ⭐ If you want security tooling that is portable across agents, editors, and
 > models, star this repository and watch the roadmap.
 
+## Quick start
+
+Requires Node.js 22.13.0 or later in the 22.x release line, Node.js 24.x or
+Node.js 26.x, pnpm, and Python 3.10 or later.
+
+```bash
+git clone https://github.com/bex-co/bex-security.git
+cd bex-security
+pnpm --dir sdk/typescript install --frozen-lockfile
+pnpm --dir sdk/typescript run build
+./bex-security scan /path/to/repository --agent claude
+```
+
+Run `./bex-security` from the checkout, or add the checkout to `PATH` for the
+current shell if you prefer the bare command:
+
+```bash
+export PATH="$PWD:$PATH"
+bex-security --help
+```
+
 ## Why Bex Security
 
 - **Upstream-first, not a rewrite.** Bex uses a repeatable upstream `main`
   merge workflow and treats Codex Security compatibility as a product
   requirement.
 - **Agent-open by design.** ACP standardizes communication between code editors
-  and coding agents. Bex will use that boundary to support a growing ecosystem
+  and coding agents. Bex uses that boundary to support a growing ecosystem
   without building a bespoke integration for every client.
 - **Model choice today.** The inherited CLI already supports OpenAI,
   OpenRouter, Fireworks, and Amazon Bedrock provider paths.
@@ -47,7 +68,8 @@ pluggable agent integration runs Claude Code through `claude-agent-acp`.
 | Codex sessions over ACP v1 and `codex-acp`       | Alpha                             |
 | Claude Code sessions over `claude-agent-acp`     | Alpha                             |
 | Additional ACP agents                            | Contributors welcome              |
-| Bex-branded package and binary                   | Planned with a compatibility path |
+| Bex-branded CLI (`bex-security`)                 | Available                         |
+| Bex-branded npm package                          | Planned with a compatibility path |
 
 ### Target architecture
 
@@ -139,8 +161,8 @@ for every agent.
 5. **Expand by evidence:** publish a capability-based compatibility matrix for
    agents and the models they expose. Keep draft ACP v2 support experimental
    until the protocol stabilizes.
-6. **Graduate the brand:** introduce Bex package and binary names with a clear
-   migration path for existing `@openai/codex-security` users.
+6. **Graduate the package brand:** publish a Bex package with a clear migration
+   path for existing `@openai/codex-security` users.
 
 Want to help? High-leverage contributions include ACP protocol mapping,
 official-schema contract fixtures, agent/model compatibility reports, upstream
@@ -150,35 +172,49 @@ support first.
 
 ## Upstream compatibility
 
-Until Bex publishes its own package, installation and command examples use the
-upstream `@openai/codex-security` name. See the
-[upstream Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)
+Until Bex publishes its own package, the TypeScript package keeps the upstream
+`@openai/codex-security` name. The Bex checkout and documentation use the
+`bex-security` command, while `codex-security` remains a compatible alias. See
+the [upstream Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)
 for the complete CLI reference and
 [upstream releases](https://github.com/openai/codex-security/releases) for the
 canonical changelog and upgrade notes.
+
+The wrapper forwards every argument to the Bex CLI. The TypeScript package also
+exposes `bex-security` as a bin alias while retaining `codex-security` for
+upstream compatibility.
 
 Some cybersecurity requests and protected findings require approval through
 Trusted Access for Cyber. To apply or check your access, visit
 [chatgpt.com/cyber](https://chatgpt.com/cyber).
 
-## Quick start
+## Choose an agent
 
-Requires Node.js 22.13.0 or later in the 22.x release line, Node.js 24.x, or
-Node.js 26.x; Python 3.10 or later; and access required by the upstream Codex
-Security runtime.
+To scan with Claude Code, authenticate Claude locally and select the Claude ACP
+agent:
 
 ```bash
-npm install @openai/codex-security
-npx @openai/codex-security login
-npx @openai/codex-security scan .
-npx @openai/codex-security scan . --patch
-npx @openai/codex-security scan . --patch --patch-severity high --json
-npx @openai/codex-security scan . --patch --patch-severity high --create-pr
-npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
-npx @openai/codex-security scan . --agent claude
-npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
-npx @openai/codex-security scan . --validation-prompt-file validation.md
-npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
+./bex-security scan /path/to/repository --agent claude
+```
+
+Codex remains the default agent. Sign in with ChatGPT or provide an API key:
+
+```bash
+./bex-security login
+./bex-security scan /path/to/repository
+```
+
+Common scan commands:
+
+```bash
+./bex-security scan . --patch
+./bex-security scan . --patch --patch-severity high --json
+./bex-security scan . --patch --patch-severity high --create-pr
+./bex-security scan . --model gpt-5.6-terra --effort high
+./bex-security scan . --agent claude
+./bex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
+./bex-security scan . --validation-prompt-file validation.md
+./bex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
 ```
 
 For CI with Codex, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing
@@ -210,7 +246,7 @@ For a monorepo, run separate standard scans and combine their results by root
 cause:
 
 ```bash
-npx @openai/codex-security scan-components . \
+./bex-security scan-components . \
   --component apps/api --component apps/web \
   --output-dir /path/outside/repository/results
 ```
@@ -223,14 +259,14 @@ To use another inference provider, set its API key and select a model:
 
 ```bash
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
-npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
+./bex-security scan . --agent codex --provider openrouter --model anthropic/claude-sonnet-4.5
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
-npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+./bex-security scan . --agent codex --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
 
 export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
 export AWS_REGION="us-east-2"
-npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+./bex-security scan . --agent codex --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
 Amazon Bedrock also supports standard AWS access keys, profiles, web identity,
@@ -245,8 +281,8 @@ which credential to use. CI and other noninteractive scans keep the existing
 API-key precedence. Select a credential explicitly when needed:
 
 ```bash
-npx @openai/codex-security scan . --auth chatgpt
-npx @openai/codex-security scan . --auth api-key
+./bex-security scan . --auth chatgpt
+./bex-security scan . --auth api-key
 ```
 
 To make your ChatGPT sign-in the automatic default, unset any configured API
@@ -288,7 +324,7 @@ incomplete or their original location was not reviewed.
 Publish every finding from a completed scan to a Linear team:
 
 ```bash
-npx @openai/codex-security publish scan /path/to/scan \
+./bex-security publish scan /path/to/scan \
   --to linear \
   --linear-team TEAM_ID
 ```
@@ -309,7 +345,7 @@ Direct publication leaves issues unassigned by default; pass
 
 ```bash
 export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
-npx @openai/codex-security publish scan /path/to/scan \
+./bex-security publish scan /path/to/scan \
   --to linear \
   --linear-team TEAM_ID \
   --linear-project PROJECT_ID \
@@ -331,7 +367,7 @@ repository's source code and vulnerability details.
 Add `--verbose` to print scan diagnostics to stderr:
 
 ```bash
-npx @openai/codex-security scan . --verbose
+./bex-security scan . --verbose
 ```
 
 `CODEX_SECURITY_LOG_LEVEL=debug` also enables diagnostics;
@@ -341,7 +377,7 @@ Verbose diagnostics may contain sensitive data. Review local logs before
 sharing them. Saved failure summaries, bulk-scan receipts, and the normal
 activity feed omit messages that contain recognizable credentials.
 
-Use `npx @openai/codex-security scans logs SCAN_ID` to inspect saved session
+Use `./bex-security scans logs SCAN_ID` to inspect saved session
 events from a scan and its workers. Press `d` during a scan to inspect
 unredacted details; `a`, `m`, and `1`–`9` select all, main, or worker
 sessions. These events can contain credentials.

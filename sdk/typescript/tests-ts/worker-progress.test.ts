@@ -42,7 +42,6 @@ describe("worker progress events", () => {
       {},
       { type: "item.completed", item: null },
       { type: "item.completed", item: [] },
-      { ...messageEvent(progress), type: "item.started" },
       { ...messageEvent(dispatch), type: "item.updated" },
       {
         type: "item.completed",
@@ -215,6 +214,23 @@ describe("worker progress events", () => {
         ),
       ),
     ).toEqual([{ phase: "validation", filesCompleted: 8, filesTotal: 8 }]);
+  });
+
+  test("reads progress from streamed ACP message and tool updates", () => {
+    const marker =
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}';
+    expect(
+      scanProgressUpdatesFromEvent({
+        ...messageEvent(marker),
+        type: "item.started",
+      }),
+    ).toEqual([{ phase: "discovery", filesCompleted: 3, filesTotal: 8 }]);
+    expect(
+      scanProgressUpdatesFromEvent({
+        ...commandEvent("review files", marker),
+        type: "item.updated",
+      }),
+    ).toEqual([{ phase: "discovery", filesCompleted: 3, filesTotal: 8 }]);
   });
 
   test("reads every file update from a completed review command", () => {
