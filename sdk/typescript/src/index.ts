@@ -72,8 +72,10 @@ export type {
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
-export { publishScan } from "./publish.js";
+export { checkScanPublication, publishScan } from "./publish.js";
 export type {
+  CheckScanPublicationOptions,
+  CheckScanPublicationResult,
   PublishScanOptions,
   PublishScanProgress,
   PublishScanResult,

@@ -185,7 +185,7 @@ exposes `bex-security` as a bin alias while retaining `codex-security` for
 upstream compatibility.
 
 Some cybersecurity requests and protected findings require approval through
-Trusted Access for Cyber. To apply or check your access, visit
+Trusted Access for Cyber. To join the program, visit
 [chatgpt.com/cyber](https://chatgpt.com/cyber).
 
 ## Choose an agent
@@ -405,12 +405,14 @@ sessions. These events can contain credentials.
 
 ## TypeScript SDK
 
+Codex Security is a Javascript package:
+
 ```ts
 import { CodexSecurity } from "@openai/codex-security";
 
 const security = new CodexSecurity();
-const result = await security.run(".");
-await security.run(".", {
+const result = await security.run("/path/to/directory");
+await security.run("/path/to/directory", {
   mode: "deep",
   workers: 2,
   subagents: 0,
