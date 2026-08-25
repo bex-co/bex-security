@@ -33,6 +33,7 @@ import { VERSION } from "./version.js";
 export interface AcpAgentSelection {
   agent: AcpAgentName;
   model?: string;
+  resolvedModel?: string;
   reasoningEffort?: string;
 }
 
@@ -536,7 +537,7 @@ async function configureSession(
   const reasoningEffort = selectedConfigValue(configOptions, "thought_level");
   return model === null || reasoningEffort === null
     ? null
-    : { model, reasoningEffort };
+    : { model: selection.resolvedModel ?? model, reasoningEffort };
 }
 
 function selectedConfigValue(
@@ -785,6 +786,9 @@ function isModelCredential(variable: string): boolean {
     name === "CODEX_API_KEY" ||
     name === "OPENROUTER_API_KEY" ||
     name === "FIREWORKS_API_KEY" ||
+    name === "ZAI_API_KEY" ||
+    name === "ANTHROPIC_API_KEY" ||
+    name === "ANTHROPIC_AUTH_TOKEN" ||
     name.startsWith("AWS_")
   );
 }
@@ -799,6 +803,7 @@ export function withoutCodexProviderCredentials(
     "CODEX_ACCESS_TOKEN",
     "OPENROUTER_API_KEY",
     "FIREWORKS_API_KEY",
+    "ZAI_API_KEY",
   ]);
   return Object.fromEntries(
     Object.entries(environment).filter(

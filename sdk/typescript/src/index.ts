@@ -56,12 +56,15 @@ export {
 export type { ProtectedScanPathKind } from "./errors.js";
 export {
   ACP_AGENT_NAMES,
+  CLAUDE_MODEL_PROVIDERS,
   DEFAULT_CODEX_CONFIG,
+  ZAI_CLAUDE_PROVIDER,
   mergedCodexConfig,
   writeCodexConfig,
 } from "./config.js";
 export type {
   AcpAgentName,
+  ClaudeModelProvider,
   CodexSecurityConfig,
   JsonObject,
   JsonValue,

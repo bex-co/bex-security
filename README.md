@@ -197,6 +197,26 @@ agent:
 ./bex-security scan /path/to/repository --agent claude
 ```
 
+To run Claude Code with GLM through Z.AI, provide a Z.AI API key and select the
+Z.AI provider:
+
+```bash
+export ZAI_API_KEY="<your-zai-api-key>"
+./bex-security scan /path/to/repository --agent claude --provider zai
+```
+
+This defaults to `glm-5.3[1m]`. Select another GLM model explicitly when
+needed:
+
+```bash
+./bex-security scan . --agent claude --provider zai --model glm-5.3
+```
+
+Bex configures Z.AI only for the Claude ACP subprocess. It does not rewrite
+your Claude Code settings or store the API key. See the
+[Z.AI Claude Code guide](https://docs.z.ai/devpack/tool/claude) for account and
+model availability details.
+
 Codex remains the default agent. Sign in with ChatGPT or provide an API key:
 
 ```bash
@@ -212,6 +232,7 @@ Common scan commands:
 ./bex-security scan . --patch --patch-severity high --create-pr
 ./bex-security scan . --model gpt-5.6-terra --effort high
 ./bex-security scan . --agent claude
+./bex-security scan . --agent claude --provider zai --model glm-5.3
 ./bex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 ./bex-security scan . --validation-prompt-file validation.md
 ./bex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5

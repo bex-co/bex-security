@@ -131,6 +131,26 @@ describe("Codex ACP adapter", () => {
     expect(events.at(-1)?.type).toBe("turn.completed");
   });
 
+  test("reports the resolved model behind a Claude model alias", async () => {
+    const thread = new AcpAgentClient(
+      {},
+      {
+        agent: "claude",
+        model: "sonnet",
+        resolvedModel: "glm-5.3[1m]",
+        reasoningEffort: "high",
+      },
+      AGENT_PATH,
+    ).startThread({ workingDirectory: process.cwd() });
+
+    await collect((await thread.runStreamed("scan with GLM")).events);
+
+    expect(thread.modelConfiguration).toEqual({
+      model: "glm-5.3[1m]",
+      reasoningEffort: "high",
+    });
+  });
+
   test("keeps model credentials out of the Claude workbench MCP process", async () => {
     const pluginRoot = await mkdtemp(join(tmpdir(), "bex-acp-plugin-"));
     try {
@@ -145,6 +165,9 @@ describe("Codex ACP adapter", () => {
                 "CODEX_API_KEY",
                 "OPENROUTER_API_KEY",
                 "FIREWORKS_API_KEY",
+                "ZAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
                 "AWS_ACCESS_KEY_ID",
               ],
             },
@@ -159,6 +182,9 @@ describe("Codex ACP adapter", () => {
           CODEX_API_KEY: "synthetic-codex-key",
           OPENROUTER_API_KEY: "synthetic-openrouter-key",
           FIREWORKS_API_KEY: "synthetic-fireworks-key",
+          ZAI_API_KEY: "synthetic-zai-key",
+          ANTHROPIC_API_KEY: "synthetic-anthropic-key",
+          ANTHROPIC_AUTH_TOKEN: "synthetic-anthropic-token",
           AWS_ACCESS_KEY_ID: "synthetic-aws-key",
         },
       });

@@ -13,8 +13,20 @@ export interface JsonObject {
 export const ACP_AGENT_NAMES = ["codex", "claude"] as const;
 export type AcpAgentName = (typeof ACP_AGENT_NAMES)[number];
 
+export const ZAI_CLAUDE_PROVIDER = {
+  name: "Z.AI",
+  baseUrl: "https://api.z.ai/api/anthropic",
+  envKey: "ZAI_API_KEY",
+  defaultModel: "glm-5.3[1m]",
+  haikuModel: "glm-4.7",
+} as const;
+
+export const CLAUDE_MODEL_PROVIDERS = ["zai"] as const;
+export type ClaudeModelProvider = (typeof CLAUDE_MODEL_PROVIDERS)[number];
+
 export interface CodexSecurityConfig {
   agent?: AcpAgentName;
+  claudeProvider?: ClaudeModelProvider;
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;

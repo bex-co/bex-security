@@ -1200,6 +1200,95 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("routes Claude ACP through Z.AI with the selected GLM model", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    const environment = {
+      ZAI_API_KEY: "synthetic-zai-key",
+      ANTHROPIC_API_KEY: "synthetic-anthropic-key",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+    };
+    let codexOptions: CodexOptions | null = null;
+    let agentSelection: AcpAgentSelection | undefined;
+    const client = new TestClient(
+      {
+        agent: "claude",
+        claudeProvider: "zai",
+      },
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options, selection) => {
+          codexOptions = options;
+          agentSelection = selection;
+          throw new Error("Z.AI scan reached");
+        },
+      },
+    );
+
+    expect(await client.preflight(repository)).toMatchObject({
+      agent: "claude",
+      authentication: {
+        method: "api_key",
+        source: "ZAI_API_KEY",
+        verified: false,
+      },
+      model: "glm-5.3[1m]",
+      reasoningEffort: "default",
+    });
+    await expect(client.run(repository)).rejects.toThrow("Z.AI scan reached");
+    expect(agentSelection).toEqual({
+      agent: "claude",
+      model: "sonnet",
+      resolvedModel: "glm-5.3[1m]",
+    });
+    expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic",
+      ANTHROPIC_AUTH_TOKEN: "synthetic-zai-key",
+      ANTHROPIC_MODEL: "glm-5.3[1m]",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-4.7",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "glm-5.3[1m]",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "glm-5.3[1m]",
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    });
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "ZAI_API_KEY",
+    );
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "ANTHROPIC_API_KEY",
+    );
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "CLAUDE_CODE_USE_BEDROCK",
+    );
+    await client.close();
+  });
+
+  test("requires ZAI_API_KEY for Claude scans through Z.AI", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const client = new TestClient(
+      { agent: "claude", claudeProvider: "zai" },
+      { environment: {} },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      "Set ZAI_API_KEY to run a Claude scan through Z.AI.",
+    );
+    await client.close();
+  });
+
   test.each(EXTERNAL_PROVIDER_CASES)(
     "requires the %s API key instead of accepting another provider's credentials",
     async (name, provider, apiKey, model, providerConfig) => {

@@ -123,6 +123,26 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("stored Codex credentials");
   });
 
+  test("routes GLM scans through Claude ACP and Z.AI", async () => {
+    let config: CodexSecurityConfig | undefined;
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--agent", "claude", "--provider", "zai", "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({ onConfig: (value) => (config = value) }),
+      ),
+    ).toBe(0);
+    expect(config).toMatchObject({
+      agent: "claude",
+      claudeProvider: "zai",
+      codexOverrides: { model: "glm-5.3[1m]" },
+    });
+    expect(stderr.text()).not.toContain("stored Codex credentials");
+  });
+
   test("passes the safety identifier as a per-scan option", async () => {
     let options: unknown;
     const stderr = capture();
@@ -182,7 +202,13 @@ describe("CLI", () => {
             enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
           },
           provider: {
-            enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
+            enum: [
+              "openai",
+              "openrouter",
+              "fireworks",
+              "amazon-bedrock",
+              "zai",
+            ],
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           patch: { type: "boolean" },
@@ -2362,10 +2388,10 @@ describe("CLI", () => {
     );
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+      "--provider <openai|openrouter|fireworks|amazon-bedrock|zai>",
     );
     expect(help.text()).toContain(
-      "Agent model to use (default: the selected agent's default).",
+      "Agent model (default: glm-5.3[1m] for Z.AI; otherwise agent default).",
     );
     expect(help.text()).toContain(
       "--effort <minimal|low|medium|high|xhigh|max>",
@@ -2383,6 +2409,9 @@ describe("CLI", () => {
     );
     expect(help.text()).toContain(
       "codex-security scan . --model gpt-5.6-terra --effort high",
+    );
+    expect(help.text()).toContain(
+      "codex-security scan . --agent claude --provider zai",
     );
     expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).not.toContain("codex-security scan . --path src,tests");
@@ -2780,6 +2809,14 @@ describe("CLI", () => {
       [
         ["scan", ".", "--provider", "fireworks"],
         "--model is required when using --provider fireworks",
+      ],
+      [
+        ["scan", ".", "--provider", "zai"],
+        "--provider zai requires --agent claude",
+      ],
+      [
+        ["scan", ".", "--agent", "claude", "--provider", "openrouter"],
+        "--agent claude supports only the native provider or --provider zai",
       ],
       [
         ["scan", ".", "--effort", "ultra"],

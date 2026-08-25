@@ -43,13 +43,16 @@ import {
 } from "./codex-prompt.js";
 import {
   ACP_AGENT_NAMES,
+  CLAUDE_MODEL_PROVIDERS,
   EXTERNAL_CODEX_PROVIDERS,
+  ZAI_CLAUDE_PROVIDER,
   isExternalModelProvider,
   mergedCodexConfig,
   scanApprovalPolicy,
   scanModelConfiguration,
   scanModelProvider,
   type AcpAgentName,
+  type ClaudeModelProvider,
   type CodexSecurityConfig,
   type JsonObject,
   type ScanModelConfiguration,
@@ -294,7 +297,8 @@ export type ScanAuthentication =
         | "OPENAI_API_KEY"
         | "CODEX_API_KEY"
         | "OPENROUTER_API_KEY"
-        | "FIREWORKS_API_KEY";
+        | "FIREWORKS_API_KEY"
+        | "ZAI_API_KEY";
       verified: false;
     }
   | {
@@ -623,7 +627,10 @@ export class CodexSecurity {
       ...(archiveDir === null ? {} : { archiveDir }),
       authentication:
         agent === "claude"
-          ? claudeAuthentication(options.auth)
+          ? claudeAuthentication(
+              options.auth,
+              configuredClaudeProvider(this.config),
+            )
           : scanAuthentication(
               this.#dependencies.environment,
               options.auth,
@@ -1865,12 +1872,18 @@ export class CodexSecurity {
       sessionConfig,
     } = session;
     const agent = configuredAgent(this.config);
+    const claudeProvider = configuredClaudeProvider(this.config);
+    const claudeModel =
+      agent === "claude"
+        ? scanModelConfigurationForAgent(this.config, session.effectiveConfig)
+            .model
+        : undefined;
     const inheritedEnvironment = selectedScanEnvironment(
       runtime.environment,
       auth,
       modelProvider,
     );
-    const environment: ProcessEnvironment = {
+    let environment: ProcessEnvironment = {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
@@ -1885,6 +1898,9 @@ export class CodexSecurity {
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
     };
+    if (claudeProvider === "zai") {
+      environment = zaiClaudeEnvironment(environment, apiKey!, claudeModel!);
+    }
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
         delete environment[name];
@@ -1911,9 +1927,14 @@ export class CodexSecurity {
     const overrides = this.config.codexOverrides ?? {};
     const selection: AcpAgentSelection = {
       agent,
-      ...(agent === "claude" && typeof overrides["model"] === "string"
-        ? { model: overrides["model"] }
-        : {}),
+      ...(agent === "claude" && claudeProvider === "zai"
+        ? {
+            model: "sonnet",
+            resolvedModel: claudeModel!,
+          }
+        : agent === "claude" && typeof overrides["model"] === "string"
+          ? { model: overrides["model"] }
+          : {}),
       ...(agent === "claude" &&
       typeof overrides["model_reasoning_effort"] === "string"
         ? { reasoningEffort: overrides["model_reasoning_effort"] }
@@ -1922,7 +1943,9 @@ export class CodexSecurity {
     const codex = this.#dependencies.createCodex(
       {
         ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
-        ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+        ...(agent !== "codex" || externalProvider !== null || apiKey === null
+          ? {}
+          : { apiKey }),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
         ),
@@ -1965,6 +1988,7 @@ export class CodexSecurity {
     try {
       const requestedConfig = await mergedCodexConfig(this.config);
       const agent = configuredAgent(this.config);
+      const claudeProvider = configuredClaudeProvider(this.config);
       const modelProvider =
         agent === "codex" ? scanModelProvider(requestedConfig) : undefined;
       const externalProvider = isExternalModelProvider(modelProvider)
@@ -1972,16 +1996,26 @@ export class CodexSecurity {
         : null;
       let authentication =
         agent === "claude"
-          ? claudeAuthentication(options.auth)
+          ? claudeAuthentication(options.auth, claudeProvider)
           : scanAuthentication(
               this.#dependencies.environment,
               options.auth,
               modelProvider,
             );
       const apiKey =
-        authentication.method === "api_key"
-          ? environmentApiKey(this.#dependencies.environment, modelProvider)
-          : null;
+        claudeProvider === "zai"
+          ? environmentValue(
+              this.#dependencies.environment,
+              ZAI_CLAUDE_PROVIDER.envKey,
+            )?.trim() ?? null
+          : authentication.method === "api_key"
+            ? environmentApiKey(this.#dependencies.environment, modelProvider)
+            : null;
+      if (claudeProvider === "zai" && apiKey === null) {
+        throw new AuthenticationRequiredError(
+          `Set ${ZAI_CLAUDE_PROVIDER.envKey} to run a Claude scan through ${ZAI_CLAUDE_PROVIDER.name}.`,
+        );
+      }
       if (externalProvider !== null && apiKey === null) {
         throw new AuthenticationRequiredError(
           `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
@@ -3202,6 +3236,24 @@ function configuredAgent(config: CodexSecurityConfig): AcpAgentName {
   return agent;
 }
 
+function configuredClaudeProvider(
+  config: CodexSecurityConfig,
+): ClaudeModelProvider | undefined {
+  const provider = config.claudeProvider;
+  if (provider === undefined) return undefined;
+  if (!CLAUDE_MODEL_PROVIDERS.includes(provider)) {
+    throw new ConfigurationError(
+      `Claude provider must be one of: ${CLAUDE_MODEL_PROVIDERS.join(", ")}.`,
+    );
+  }
+  if (configuredAgent(config) !== "claude") {
+    throw new ConfigurationError(
+      "claudeProvider is only available when agent is claude.",
+    );
+  }
+  return provider;
+}
+
 function scanModelConfigurationForAgent(
   config: CodexSecurityConfig,
   effectiveConfig: Readonly<JsonObject>,
@@ -3212,7 +3264,11 @@ function scanModelConfigurationForAgent(
   const overrides = config.codexOverrides ?? {};
   return {
     model:
-      typeof overrides["model"] === "string" ? overrides["model"] : "default",
+      typeof overrides["model"] === "string"
+        ? overrides["model"]
+        : configuredClaudeProvider(config) === "zai"
+          ? ZAI_CLAUDE_PROVIDER.defaultModel
+          : "default",
     reasoningEffort:
       typeof overrides["model_reasoning_effort"] === "string"
         ? overrides["model_reasoning_effort"]
@@ -3220,13 +3276,63 @@ function scanModelConfigurationForAgent(
   };
 }
 
-function claudeAuthentication(auth: ScanAuthMode = "auto"): ScanAuthentication {
+function claudeAuthentication(
+  auth: ScanAuthMode = "auto",
+  provider?: ClaudeModelProvider,
+): ScanAuthentication {
   if (auth !== "auto") {
     throw new ConfigurationError(
       "Claude ACP manages its own authentication; --auth is only available with --agent codex.",
     );
   }
+  if (provider === "zai") {
+    return {
+      method: "api_key",
+      source: ZAI_CLAUDE_PROVIDER.envKey,
+      verified: false,
+    };
+  }
   return { method: "agent", agent: "claude", verified: false };
+}
+
+function zaiClaudeEnvironment(
+  environment: ProcessEnvironment,
+  apiKey: string,
+  model: string,
+): ProcessEnvironment {
+  const replaced = new Set([
+    "ZAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  ]);
+  return {
+    ...Object.fromEntries(
+      Object.entries(environment).filter(
+        ([name]) => !replaced.has(name.toUpperCase()),
+      ),
+    ),
+    ANTHROPIC_BASE_URL: ZAI_CLAUDE_PROVIDER.baseUrl,
+    ANTHROPIC_AUTH_TOKEN: apiKey,
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: ZAI_CLAUDE_PROVIDER.haikuModel,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    ...(model.includes("[1m]")
+      ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000" }
+      : {}),
+  };
 }
 
 export function scanAuthentication(

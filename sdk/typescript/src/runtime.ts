@@ -1409,7 +1409,10 @@ export async function runWorkbench(
           name.toUpperCase() !== "OPENAI_API_KEY" &&
           name.toUpperCase() !== "CODEX_API_KEY" &&
           name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-          name.toUpperCase() !== "FIREWORKS_API_KEY",
+          name.toUpperCase() !== "FIREWORKS_API_KEY" &&
+          name.toUpperCase() !== "ZAI_API_KEY" &&
+          name.toUpperCase() !== "ANTHROPIC_API_KEY" &&
+          name.toUpperCase() !== "ANTHROPIC_AUTH_TOKEN",
       ),
     );
     const result = await runCodexCommand(

@@ -65,6 +65,7 @@ import {
   ACP_AGENT_NAMES,
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
+  ZAI_CLAUDE_PROVIDER,
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
@@ -267,6 +268,10 @@ const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
   .describe("Inference provider for scans.");
+const SCAN_PROVIDER_OPTION = z
+  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock", "zai"])
+  .default("openai")
+  .describe("Inference provider; zai requires --agent claude.");
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
@@ -864,7 +869,7 @@ interface ScanArguments extends DeepScanOptions {
   mode: ScanMode;
   model?: string;
   effort?: ScanReasoningEffort;
-  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
+  provider?: "openai" | "amazon-bedrock" | "zai" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -2312,10 +2317,10 @@ export async function main(
           model: optionValue("--model")
             .optional()
             .describe(
-              "Agent model to use (default: the selected agent's default).",
+              `Agent model (default: ${ZAI_CLAUDE_PROVIDER.defaultModel} for Z.AI; otherwise agent default).`,
             ),
           effort: effortOption(),
-          provider: PROVIDER_OPTION,
+          provider: SCAN_PROVIDER_OPTION,
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -2369,11 +2374,19 @@ export async function main(
           { message: "--auth is only available with --agent codex." },
         )
         .refine(
+          (options) => options.agent === "claude" || options.provider !== "zai",
+          { message: "--provider zai requires --agent claude." },
+        )
+        .refine(
           (options) =>
             options.agent === "codex" ||
             options.provider === undefined ||
-            options.provider === "openai",
-          { message: "--provider is only available with --agent codex." },
+            options.provider === "openai" ||
+            options.provider === "zai",
+          {
+            message:
+              "--agent claude supports only the native provider or --provider zai.",
+          },
         )
         .refine(
           (options) => options.agent === "codex" || options.codex.length === 0,
@@ -2441,6 +2454,10 @@ export async function main(
         {
           args: { repository: "." },
           options: { model: "gpt-5.6-terra", effort: "high" },
+        },
+        {
+          args: { repository: "." },
+          options: { agent: "claude", provider: "zai" },
         },
         { args: { repository: "." }, options: { path: ["src"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
@@ -5395,17 +5412,22 @@ async function executeScan(
       resolve(directory, repository),
       arguments_.validationPromptFile,
     );
+    const requestedModel =
+      arguments_.provider === "zai"
+        ? arguments_.model ?? ZAI_CLAUDE_PROVIDER.defaultModel
+        : arguments_.model;
     const config: CodexSecurityConfig = {
       agent: arguments_.agent,
+      ...(arguments_.provider === "zai" ? { claudeProvider: "zai" } : {}),
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
       codexOverrides:
         arguments_.codexOverrides ??
         parseCodexOverrides(
           arguments_.codex,
-          arguments_.model,
+          requestedModel,
           arguments_.effort,
-          arguments_.provider,
+          arguments_.provider === "zai" ? undefined : arguments_.provider,
         ),
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
@@ -5414,7 +5436,7 @@ async function executeScan(
       ...config.codexOverrides,
     };
     if (arguments_.agent === "claude") {
-      effectiveModel = arguments_.model ?? "default";
+      effectiveModel = requestedModel ?? "default";
       effectiveReasoningEffort = arguments_.effort ?? "default";
     } else {
       ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
@@ -5448,9 +5470,15 @@ async function executeScan(
       };
     }
     selectedAuthentication =
-      arguments_.agent === "claude"
-        ? { method: "agent", agent: "claude", verified: false }
-        : scanAuthentication(dependencies.environment, auth, provider);
+      arguments_.provider === "zai"
+        ? {
+            method: "api_key",
+            source: ZAI_CLAUDE_PROVIDER.envKey,
+            verified: false,
+          }
+        : arguments_.agent === "claude"
+          ? { method: "agent", agent: "claude", verified: false }
+          : scanAuthentication(dependencies.environment, auth, provider);
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,

@@ -113,6 +113,7 @@ Pass runtime configuration to the `CodexSecurity` constructor:
 | Option           | Description                                                                 |
 | ---------------- | --------------------------------------------------------------------------- |
 | `agent`          | Select `"codex"` (default) or the experimental `"claude"` ACP agent.        |
+| `claudeProvider` | Select `"zai"` to route the Claude agent through Z.AI.                      |
 | `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin. |
 | `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                   |
 | `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.        |
@@ -154,10 +155,24 @@ npx @openai/codex-security scan . --agent claude
 ```
 
 Claude Code owns authentication and advertises its available models and
-reasoning levels over ACP. `--auth`, `--provider`, `--codex`, and
-`--safety-identifier` are Codex-only options. When selecting a Claude model or
+reasoning levels over ACP. `--auth`, `--codex`, and `--safety-identifier` are
+Codex-only options. Claude supports its native provider and Z.AI; other
+`--provider` values remain Codex-only. When selecting a native Claude model or
 reasoning level, pass values advertised by the installed Claude agent with
 `--model` and `--effort`.
+
+To run the Claude ACP agent with GLM through Z.AI:
+
+```bash
+export ZAI_API_KEY="<your-zai-api-key>"
+npx @openai/codex-security scan . --agent claude --provider zai
+```
+
+The Z.AI path defaults to `glm-5.3[1m]`; use `--model glm-5.3` (or another GLM
+model supported by your Z.AI account) to override it. The provider settings and
+credential apply only to the Claude ACP subprocess. See the
+[Z.AI Claude Code guide](https://docs.z.ai/devpack/tool/claude) for account and
+model availability details.
 
 For local use, sign in with ChatGPT:
 
