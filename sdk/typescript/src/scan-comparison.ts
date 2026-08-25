@@ -2,13 +2,13 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  Codex,
   type CodexOptions,
   type ModelReasoningEffort,
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import { AcpAgentClient, AcpCodex } from "./acp-codex.js";
 import type { CodexSecuritySurface } from "./api.js";
 import { accountStatus } from "./auth.js";
 import {
@@ -119,19 +119,31 @@ export async function matchScanFindingsInternal(
     options,
     runtimeOptions,
   );
-  let response: unknown;
-  try {
-    response = JSON.parse(finalResponse);
-  } catch (error) {
-    throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
-      cause: error,
-    });
-  }
+  const response = parseComparisonJson(finalResponse);
   return validateComparison(
     input,
     response,
     options.allowHistoricalUncertainty ?? false,
   );
+}
+
+function parseComparisonJson(finalResponse: string): unknown {
+  const response = finalResponse.trim();
+  try {
+    return JSON.parse(response);
+  } catch (error) {
+    const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/iu.exec(
+      response,
+    );
+    if (fenced !== null) {
+      try {
+        return JSON.parse(fenced[1]!);
+      } catch {}
+    }
+    throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
+      cause: error,
+    });
+  }
 }
 
 export async function runReadOnlyCodex(
@@ -140,65 +152,101 @@ export async function runReadOnlyCodex(
   options: ReadOnlyCodexOptions,
   runtimeOptions: { surface: CodexSecuritySurface },
 ): Promise<string> {
+  const agent = options.config?.agent ?? "codex";
   const config =
     options.config === undefined
       ? undefined
       : await mergedCodexConfig(options.config);
   const configuredModel =
-    config === undefined ? undefined : scanModelConfiguration(config);
+    config === undefined
+      ? undefined
+      : agent === "codex"
+        ? scanModelConfiguration(config)
+        : {
+            model:
+              typeof options.config?.codexOverrides?.["model"] === "string"
+                ? options.config.codexOverrides["model"]
+                : undefined,
+            reasoningEffort:
+              typeof options.config?.codexOverrides?.[
+                "model_reasoning_effort"
+              ] === "string"
+                ? options.config.codexOverrides["model_reasoning_effort"]
+                : undefined,
+          };
   const model = options.model ?? configuredModel?.model;
   const reasoningEffort =
     options.reasoningEffort ??
     (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
-    "medium";
-  const environment =
+    (agent === "codex" ? "medium" : undefined);
+  const environment: Record<string, string> | undefined =
     options.codex === undefined
-      ? await comparisonEnvironment(
-          options.environment,
-          accountStatus,
-          options.signal,
-        )
+      ? agent === "codex"
+        ? await comparisonEnvironment(
+            options.environment,
+            accountStatus,
+            options.signal,
+          )
+        : Object.fromEntries(
+            Object.entries(options.environment ?? process.env).filter(
+              (entry): entry is [string, string] =>
+                typeof entry[1] === "string",
+            ),
+          )
       : undefined;
   const command =
-    environment === undefined ? undefined : resolveCodexCommand(environment);
+    environment === undefined || agent === "claude"
+      ? undefined
+      : resolveCodexCommand(environment);
   const codex =
     options.codex ??
-    new Codex({
-      codexPathOverride: command!.command,
-      env: environment,
-      config: {
-        ...config,
-        mcp_servers: await disabledMcpServers(
-          command!,
-          config,
-          environment!,
-          options,
-        ),
-        allow_login_shell: false,
-        responses_api_metadata: {
-          codex_security_surface: runtimeOptions.surface,
-        },
-        features: {
-          apps: false,
-          code_mode: false,
-          code_mode_only: false,
-          js_repl: false,
-          multi_agent: false,
-          multi_agent_v2: false,
-          plugins: false,
-          shell_tool: false,
-          unified_exec: false,
-        },
-        shell_environment_policy: {
-          inherit: "core",
-          ignore_default_excludes: false,
-          exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
-        },
-      } as NonNullable<CodexOptions["config"]>,
-    });
+    (agent === "claude"
+      ? new AcpAgentClient(
+          { env: environment },
+          {
+            agent,
+            ...(model === undefined ? {} : { model }),
+            ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+          },
+        )
+      : new AcpCodex({
+          codexPathOverride: command!.command,
+          env: environment,
+          config: {
+            ...config,
+            mcp_servers: await disabledMcpServers(
+              command!,
+              config,
+              environment!,
+              options,
+            ),
+            allow_login_shell: false,
+            responses_api_metadata: {
+              codex_security_surface: runtimeOptions.surface,
+            },
+            features: {
+              apps: false,
+              code_mode: false,
+              code_mode_only: false,
+              js_repl: false,
+              multi_agent: false,
+              multi_agent_v2: false,
+              plugins: false,
+              shell_tool: false,
+              unified_exec: false,
+            },
+            shell_environment_policy: {
+              inherit: "core",
+              ignore_default_excludes: false,
+              exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
+            },
+          } as NonNullable<CodexOptions["config"]>,
+        }));
   const thread = codex.startThread({
-    ...(model === undefined ? {} : { model }),
-    modelReasoningEffort: reasoningEffort,
+    ...(agent === "codex" && model !== undefined ? { model } : {}),
+    ...(agent === "codex" && reasoningEffort !== undefined
+      ? { modelReasoningEffort: reasoningEffort }
+      : {}),
     sandboxMode: "read-only",
     approvalPolicy: "never",
     networkAccessEnabled: false,

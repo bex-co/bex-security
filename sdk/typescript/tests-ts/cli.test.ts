@@ -90,6 +90,39 @@ async function multiscanInventory(root: string): Promise<void> {
 }
 
 describe("CLI", () => {
+  test("routes scans through the selected ACP agent", async () => {
+    let config: CodexSecurityConfig | undefined;
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--agent",
+          "claude",
+          "--model",
+          "sonnet",
+          "--effort",
+          "high",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ onConfig: (value) => (config = value) }),
+      ),
+    ).toBe(0);
+    expect(config).toMatchObject({
+      agent: "claude",
+      codexOverrides: {
+        model: "sonnet",
+        model_reasoning_effort: "high",
+      },
+    });
+    expect(stderr.text()).not.toContain("stored Codex credentials");
+  });
+
   test("passes the safety identifier as a per-scan option", async () => {
     let options: unknown;
     const stderr = capture();
@@ -135,6 +168,7 @@ describe("CLI", () => {
       args: { properties: { repository: { type: "string" } } },
       options: {
         properties: {
+          agent: { enum: ["codex", "claude"] },
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
           workers: { type: "integer" },
@@ -2331,7 +2365,7 @@ describe("CLI", () => {
       "--provider <openai|openrouter|fireworks|amazon-bedrock>",
     );
     expect(help.text()).toContain(
-      `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+      "Agent model to use (default: the selected agent's default).",
     );
     expect(help.text()).toContain(
       "--effort <minimal|low|medium|high|xhigh|max>",
@@ -2927,6 +2961,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Running scan");
     expect(stderr.text()).toContain("Scan complete");
     expect(captured.config).toEqual({
+      agent: "codex",
       pluginPath: "plugin.zip",
       pythonPath: "/managed/python",
       codexOverrides: { features: { goals: true } },

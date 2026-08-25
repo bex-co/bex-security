@@ -62,12 +62,14 @@ import {
   type BulkScanPrompt,
 } from "./bulk-scan-discovery.js";
 import {
+  ACP_AGENT_NAMES,
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
   scanModelProvider,
+  type AcpAgentName,
   type CodexSecurityConfig,
   type ExternalModelProvider,
   type JsonObject,
@@ -211,6 +213,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
 } as const;
 const VALUE_OPTIONS = new Set([
   "--auth",
+  "--agent",
   "--safety-identifier",
   "--path",
   "--component",
@@ -844,6 +847,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  agent: AcpAgentName;
   auth?: ScanAuthMode;
   safetyIdentifier?: string;
   verbose?: boolean;
@@ -2242,6 +2246,10 @@ export async function main(
       }),
       options: z
         .object({
+          agent: z
+            .enum(ACP_AGENT_NAMES)
+            .default("codex")
+            .describe("ACP agent to run (default: codex)."),
           auth: z
             .enum(SCAN_AUTH_MODES)
             .default("auto")
@@ -2301,7 +2309,7 @@ export async function main(
           model: optionValue("--model")
             .optional()
             .describe(
-              `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+              "Agent model to use (default: the selected agent's default).",
             ),
           effort: effortOption(),
           provider: PROVIDER_OPTION,
@@ -2353,6 +2361,29 @@ export async function main(
             .default(false)
             .describe("Validate local scan inputs without starting a scan."),
         })
+        .refine(
+          (options) => options.agent === "codex" || options.auth === "auto",
+          { message: "--auth is only available with --agent codex." },
+        )
+        .refine(
+          (options) =>
+            options.agent === "codex" ||
+            options.provider === undefined ||
+            options.provider === "openai",
+          { message: "--provider is only available with --agent codex." },
+        )
+        .refine(
+          (options) => options.agent === "codex" || options.codex.length === 0,
+          { message: "--codex is only available with --agent codex." },
+        )
+        .refine(
+          (options) =>
+            options.agent === "codex" || options.safetyIdentifier === undefined,
+          {
+            message:
+              "--safety-identifier is only available with --agent codex.",
+          },
+        )
         .refine(
           (options) =>
             Number(options.path.length > 0) +
@@ -2430,6 +2461,7 @@ export async function main(
         }
         const outcome = await runScan(
           {
+            agent: options.agent,
             auth: options.auth,
             safetyIdentifier: options.safetyIdentifier,
             verbose: options.verbose,
@@ -3809,6 +3841,12 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains an invalid mode.",
     );
   }
+  const agent = recipe["agent"] ?? "codex";
+  if (agent !== "codex" && agent !== "claude") {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid ACP agent.",
+    );
+  }
   const config = recipe["config"];
   if (config === undefined || !isJsonObject(config)) {
     throw new CodexSecurityError(
@@ -3870,6 +3908,7 @@ function scanArgumentsFromRecipe(
     );
   }
   return {
+    agent,
     repository,
     paths,
     knowledgeBasePaths,
@@ -5354,6 +5393,7 @@ async function executeScan(
       arguments_.validationPromptFile,
     );
     const config: CodexSecurityConfig = {
+      agent: arguments_.agent,
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
       codexOverrides:
@@ -5370,11 +5410,19 @@ async function executeScan(
       ...DEFAULT_CODEX_CONFIG,
       ...config.codexOverrides,
     };
-    ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
-      scanModelConfiguration(effectiveConfiguration));
-    const provider = scanModelProvider(effectiveConfiguration);
+    if (arguments_.agent === "claude") {
+      effectiveModel = arguments_.model ?? "default";
+      effectiveReasoningEffort = arguments_.effort ?? "default";
+    } else {
+      ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
+        scanModelConfiguration(effectiveConfiguration));
+    }
+    const provider =
+      arguments_.agent === "codex"
+        ? scanModelProvider(effectiveConfiguration)
+        : undefined;
     const auth =
-      !arguments_.dryRun && interactive
+      arguments_.agent === "codex" && !arguments_.dryRun && interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
@@ -5396,11 +5444,10 @@ async function executeScan(
         )?.[provider],
       };
     }
-    selectedAuthentication = scanAuthentication(
-      dependencies.environment,
-      auth,
-      provider,
-    );
+    selectedAuthentication =
+      arguments_.agent === "claude"
+        ? { method: "agent", agent: "claude", verified: false }
+        : scanAuthentication(dependencies.environment, auth, provider);
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
@@ -5437,7 +5484,10 @@ async function executeScan(
       dashboard = new ScanDashboard(errorOutput, {
         repository,
         mode: arguments_.mode,
-        model: scanModelConfiguration(await mergedCodexConfig(config)),
+        model: {
+          model: effectiveModel,
+          reasoningEffort: effectiveReasoningEffort,
+        },
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),
@@ -5571,7 +5621,8 @@ async function executeScan(
           requested: auth ?? "auto",
           method: authentication.method,
           source:
-            authentication.method !== "stored_credentials"
+            authentication.method === "api_key" ||
+            authentication.method === "aws_credentials"
               ? authentication.source
               : undefined,
           verified: authentication.verified,
@@ -5582,7 +5633,9 @@ async function executeScan(
               ? `Using API key from ${authentication.source}`
               : authentication.method === "aws_credentials"
                 ? `Using AWS credentials from ${authentication.source}`
-                : "Using stored Codex credentials",
+                : authentication.method === "agent"
+                  ? "Using Claude agent authentication"
+                  : "Using stored Codex credentials",
           );
           return;
         }
@@ -5598,6 +5651,8 @@ async function executeScan(
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
           );
+        } else if (authentication.method === "agent") {
+          progress?.stage("Authentication: managed by Claude Agent.");
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
@@ -5822,7 +5877,8 @@ async function executeScan(
       reasoning_effort: effectivePreflight.reasoningEffort,
       method: effectivePreflight.authentication.method,
       source:
-        effectivePreflight.authentication.method !== "stored_credentials"
+        effectivePreflight.authentication.method === "api_key" ||
+        effectivePreflight.authentication.method === "aws_credentials"
           ? effectivePreflight.authentication.source
           : undefined,
       verified: effectivePreflight.authentication.verified,

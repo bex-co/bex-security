@@ -43,6 +43,7 @@ import {
   classifyConnectionFailure,
   initialCredentialsAvailable,
 } from "../src/api.js";
+import type { AcpAgentSelection } from "../src/acp-codex.js";
 import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -649,6 +650,7 @@ describe("CodexSecurity orchestration", () => {
         outputDir: output,
       }),
     ).resolves.toEqual({
+      agent: "codex",
       repository,
       target: { kind: "paths", paths: ["src"] },
       mode: "deep",
@@ -1136,6 +1138,64 @@ describe("CodexSecurity orchestration", () => {
           ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
         ),
       ).toBe(false);
+    }
+    await client.close();
+  });
+
+  test("does not expose Codex provider credentials to the Claude agent", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    const environment = {
+      ANTHROPIC_API_KEY: "synthetic-anthropic-key",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      AWS_ACCESS_KEY_ID: "synthetic-claude-aws-key",
+      OPENAI_API_KEY: "synthetic-openai-key",
+      CODEX_API_KEY: "synthetic-codex-key",
+      CODEX_ACCESS_TOKEN: "synthetic-codex-token",
+      OPENROUTER_API_KEY: "synthetic-openrouter-key",
+      FIREWORKS_API_KEY: "synthetic-fireworks-key",
+    };
+    let codexOptions: CodexOptions | null = null;
+    let agentSelection: AcpAgentSelection | undefined;
+    const client = new TestClient(
+      { agent: "claude" },
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options, selection) => {
+          codexOptions = options;
+          agentSelection = selection;
+          throw new Error("Claude scan reached");
+        },
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow("Claude scan reached");
+    expect(agentSelection).toEqual({ agent: "claude" });
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      ANTHROPIC_API_KEY: "synthetic-anthropic-key",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      AWS_ACCESS_KEY_ID: "synthetic-claude-aws-key",
+    });
+    for (const credential of [
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      "CODEX_ACCESS_TOKEN",
+      "OPENROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
+    ]) {
+      expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+        credential,
+      );
     }
     await client.close();
   });

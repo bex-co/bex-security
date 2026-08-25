@@ -3,7 +3,7 @@
 **Open security workflows for every coding agent and model.**
 
 [![Upstream: openai/codex-security](https://img.shields.io/badge/upstream-openai%2Fcodex--security-111827)](https://github.com/openai/codex-security)
-[![ACP roadmap](https://img.shields.io/badge/roadmap-Agent%20Client%20Protocol-7c3aed)](https://github.com/agentclientprotocol)
+[![ACP alpha](https://img.shields.io/badge/ACP-Codex%20%2B%20Claude%20alpha-7c3aed)](https://github.com/agentclientprotocol)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Bex Security is an upstream-first fork of
@@ -35,15 +35,18 @@ upstream security improvements.
 ## Project status
 
 Bex Security is an early-stage fork. The current codebase preserves the
-upstream package name and CLI behavior so existing workflows keep working. ACP
-support is the direction of travel, not a shipped feature yet.
+upstream package name and CLI behavior so existing workflows keep working. Its
+first ACP vertical slice runs Codex sessions through `codex-acp`, and its first
+pluggable agent integration runs Claude Code through `claude-agent-acp`.
 
 | Capability                                       | Status                            |
 | ------------------------------------------------ | --------------------------------- |
 | Codex Security-compatible CLI and TypeScript SDK | Available                         |
 | Multiple inference-provider paths                | Available                         |
 | Repeatable upstream merge workflow               | Available                         |
-| ACP agent integration                            | Planned — contributors welcome    |
+| Codex sessions over ACP v1 and `codex-acp`       | Alpha                             |
+| Claude Code sessions over `claude-agent-acp`     | Alpha                             |
+| Additional ACP agents                            | Contributors welcome              |
 | Bex-branded package and binary                   | Planned with a compatibility path |
 
 ### Target architecture
@@ -68,13 +71,14 @@ flowchart TB
         workbench["scan workbench (local Python subprocess + MCP server)"]
         history[("scan history (local SQLite)")]
         gateway["scoped execution gateway (in-process policy + MCP config)"]
-        codexAdapter["Codex adapter (current, in-process)"]
-        acpAdapter["ACP client adapter (planned, in-process)"]
+        acpAdapter["ACP v1 client adapter + agent drivers (current, in-process)"]
     end
 
-    subgraph agents["Agent processes launched per session"]
-        codex["Codex runtime + security plugin (current subprocess)"]
-        acp["compatible ACP agent (planned subprocess)"]
+    subgraph agents["Agent processes launched per turn"]
+        codexAcp["codex-acp agent (current subprocess)"]
+        codex["Codex app-server + security plugin (current subprocess)"]
+        claudeAcp["claude-agent-acp + Claude Code (current subprocess)"]
+        acp["additional compatible ACP agent (future subprocess)"]
     end
 
     operator --> entry
@@ -85,25 +89,33 @@ flowchart TB
     orchestrator --> workbench
     workbench --> history
     workbench --> artifacts
-    runtime --> codexAdapter
     runtime --> acpAdapter
-    codexAdapter --> codex
-    acpAdapter <-->|bidirectional ACP v1 over stdio| acp
-    codexAdapter --> gateway
+    acpAdapter <-->|bidirectional ACP v1 over stdio| codexAcp
+    acpAdapter <-->|same ACP v1 transport| claudeAcp
+    codexAcp <-->|Codex app-server JSON-RPC| codex
+    acpAdapter -.->|future capability-tested driver| acp
     acpAdapter --> gateway
     gateway -->|read-only source access| repo
     gateway -->|draft writes| artifacts
     gateway -->|stdio MCP tools| workbench
+    claudeAcp -->|Claude-owned model configuration| model
     codex -->|provider-specific API| model
     acp -->|agent-owned model configuration| model
 ```
 
-The current Codex adapter remains the compatibility baseline. The planned ACP
-adapter makes Bex the client: it launches an agent, negotiates capabilities,
-opens sessions, sends prompts, streams updates, handles cancellation and
-permission requests, and supplies scoped filesystem, terminal, and stdio MCP
-access. The selected agent—not ACP or Bex—owns its model/provider connection and
-may expose model and reasoning choices through ACP session configuration.
+The adapter makes Bex the ACP client and selects a small agent driver for
+`codex-acp` or `claude-agent-acp`. Bex launches the selected agent per turn,
+negotiates ACP v1, creates or resumes its session, streams protocol updates into
+the existing scan observers, forwards cancellation, and preserves the current
+noninteractive permission boundary. The agent still owns model authentication
+and access; Bex continues to own scan scope, the workflow, workbench tools, and
+artifact validation. This keeps the integration small enough to track upstream
+while proving that orchestration is independent of one agent transport.
+
+The adapter boundary is capability-based rather than Codex-shaped. A new agent
+must prove that it can run the same scoped workflow and produce artifacts that
+pass Bex's existing validation and sealing contract. ACP does not make agents
+or model APIs interchangeable by itself.
 
 To make the workflow portable, Bex must extract the security instructions and
 schemas from Codex-specific plugin loading into a runtime-neutral workflow pack.
@@ -119,12 +131,11 @@ for every agent.
 2. **Extract the stable host contract:** separate portable prompts, schemas,
    workbench tools, artifact rules, and progress events from Codex plugin
    installation details.
-3. **Add the ACP v1 adapter:** use the official TypeScript SDK for capability
-   negotiation, authentication, sessions, cancellation, permissions, scoped
-   filesystem/terminal access, and stdio MCP tools.
-4. **Prove the vertical slice:** run the full scan lifecycle through
-   `codex-acp`, then add registry agents only when they pass the same contract
-   and scan-integrity tests.
+3. **Harden the ACP v1 vertical slice:** expand the Codex and Claude drivers
+   from protocol and compatibility tests to repeatable full-scan fixtures,
+   structured-output conformance, and interruption tests.
+4. **Open the agent port:** add registry agents only when they pass the same
+   capability, artifact-contract, and scan-integrity suite.
 5. **Expand by evidence:** publish a capability-based compatibility matrix for
    agents and the models they expose. Keep draft ACP v2 support experimental
    until the protocol stabilizes.
@@ -164,12 +175,16 @@ npx @openai/codex-security scan . --patch
 npx @openai/codex-security scan . --patch --patch-severity high --json
 npx @openai/codex-security scan . --patch --patch-severity high --create-pr
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
+npx @openai/codex-security scan . --agent claude
 npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scan . --validation-prompt-file validation.md
 npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
 ```
 
-For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in.
+For CI with Codex, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing
+in. `--agent claude` delegates authentication and model discovery to the local
+Claude Code installation. The default remains `--agent codex`; saved scan
+recipes created before agent selection also replay with Codex.
 
 Use `--validation-prompt-file` to replace final validation with your own setup,
 testing, and cleanup instructions. This works for standard and diff scans;

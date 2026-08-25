@@ -10,12 +10,16 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  Codex,
   type CodexOptions,
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import {
+  AcpAgentClient,
+  AcpCodex,
+  type AcpAgentSelection,
+} from "../src/acp-codex.js";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import {
   comparisonEnvironment,
@@ -92,13 +96,15 @@ describe("semantic scan comparison", () => {
     let config: CodexOptions["config"];
     let codexPath: string | undefined;
     const startThread = spyOn(
-      Codex.prototype,
+      AcpCodex.prototype,
       "startThread",
-    ).mockImplementation(function (this: Codex, options) {
+    ).mockImplementation(function (this: AcpCodex, options) {
       config = (this as unknown as { options: CodexOptions }).options.config;
       codexPath = (this as unknown as { options: CodexOptions }).options
         .codexPathOverride;
-      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      return codex.startThread(options!) as unknown as ReturnType<
+        AcpCodex["startThread"]
+      >;
     });
     try {
       await matchScanFindings(
@@ -149,6 +155,54 @@ describe("semantic scan comparison", () => {
         { name: "inherited", enabled: false },
         { name: "synthetic", enabled: false },
       ]);
+    } finally {
+      startThread.mockRestore();
+    }
+  });
+
+  test("uses the selected Claude agent for read-only comparison turns", async () => {
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    let selection: AcpAgentSelection | undefined;
+    const startThread = spyOn(
+      AcpAgentClient.prototype,
+      "startThread",
+    ).mockImplementation(function (this: AcpAgentClient, options) {
+      selection = (this as unknown as { selection: AcpAgentSelection })
+        .selection;
+      return codex.startThread(options!) as unknown as ReturnType<
+        AcpAgentClient["startThread"]
+      >;
+    });
+    try {
+      await matchScanFindings(
+        { before: [], after: [] },
+        {
+          config: {
+            agent: "claude",
+            codexOverrides: {
+              model: "sonnet",
+              model_reasoning_effort: "high",
+            },
+          },
+          environment: {
+            ANTHROPIC_API_KEY: "synthetic-anthropic-key",
+            OPENROUTER_API_KEY: "synthetic-unrelated-key",
+          },
+        },
+      );
+
+      expect(selection).toEqual({
+        agent: "claude",
+        model: "sonnet",
+        reasoningEffort: "high",
+      });
+      expect(calls.threadOptions).toMatchObject({
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+        networkAccessEnabled: false,
+      });
+      expect(calls.threadOptions).not.toHaveProperty("model");
+      expect(calls.threadOptions).not.toHaveProperty("modelReasoningEffort");
     } finally {
       startThread.mockRestore();
     }
@@ -594,6 +648,14 @@ describe("semantic scan comparison", () => {
     await expect(
       matchScanFindings({ before: [], after: [] }, { codex }),
     ).rejects.toThrow("invalid JSON");
+  });
+
+  test("accepts a JSON code fence from an ACP agent", async () => {
+    const { codex } = fakeCodex('```json\n{"matches":[],"uncertain":[]}\n```');
+
+    await expect(
+      matchScanFindings({ before: [], after: [] }, { codex }),
+    ).resolves.toEqual({ matches: [], uncertain: [] });
   });
 
   test("allows cross-history uncertainty without relaxing two-scan matching", async () => {

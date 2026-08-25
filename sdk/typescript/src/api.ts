@@ -14,7 +14,6 @@ import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
-  Codex,
   type CodexOptions,
   type ThreadOptions,
   type TurnOptions,
@@ -33,17 +32,24 @@ import {
   type AccountStatus,
 } from "./auth.js";
 import {
+  AcpAgentClient,
+  type AcpAgentSelection,
+  withoutCodexProviderCredentials,
+} from "./acp-codex.js";
+import {
   jsonForPrompt,
   pluginPythonCommand,
   shellEnvironmentReference,
 } from "./codex-prompt.js";
 import {
+  ACP_AGENT_NAMES,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergedCodexConfig,
   scanApprovalPolicy,
   scanModelConfiguration,
   scanModelProvider,
+  type AcpAgentName,
   type CodexSecurityConfig,
   type JsonObject,
   writeCodexConfig,
@@ -274,6 +280,11 @@ export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 
 export type ScanAuthentication =
   | {
+      method: "agent";
+      agent: "claude";
+      verified: false;
+    }
+  | {
       method: "api_key";
       source:
         | "OPENAI_API_KEY"
@@ -326,6 +337,7 @@ type ScanObserverName =
   | "onWarning";
 
 export interface ScanPreflight extends DeepScanOptions {
+  agent?: AcpAgentName;
   repository: string;
   target: NormalizedTarget;
   mode: ScanMode;
@@ -359,7 +371,10 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
-  createCodex(options: CodexOptions): CodexClientLike;
+  createCodex(
+    options: CodexOptions,
+    selection?: AcpAgentSelection,
+  ): CodexClientLike;
   environment: ProcessEnvironment;
   prepareRuntime?: (
     config: Readonly<CodexSecurityConfig>,
@@ -374,7 +389,7 @@ interface ClientDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  createCodex: (options) => new Codex(options),
+  createCodex: (options, selection) => new AcpAgentClient(options, selection),
   environment: process.env,
 };
 
@@ -579,8 +594,10 @@ export class CodexSecurity {
       await knowledgeBase.cleanup();
     }
     const configuration = await mergedCodexConfig(this.config);
-    const model = scanModelConfiguration(configuration);
-    const modelProvider = scanModelProvider(configuration);
+    const model = scanModelConfigurationForAgent(this.config, configuration);
+    const agent = configuredAgent(this.config);
+    const modelProvider =
+      agent === "codex" ? scanModelProvider(configuration) : undefined;
     validateScanCostLimit(options.maxCostUsd, model.model);
     const archiveDir =
       options.archiveExisting === true
@@ -588,6 +605,7 @@ export class CodexSecurity {
         : null;
     this.#requireOpen();
     return {
+      agent,
       repository: inputs.repository,
       target: inputs.target,
       mode: inputs.mode,
@@ -597,11 +615,14 @@ export class CodexSecurity {
         : {}),
       outputDir: inputs.outputDir,
       ...(archiveDir === null ? {} : { archiveDir }),
-      authentication: scanAuthentication(
-        this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-      ),
+      authentication:
+        agent === "claude"
+          ? claudeAuthentication(options.auth)
+          : scanAuthentication(
+              this.#dependencies.environment,
+              options.auth,
+              modelProvider,
+            ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
       ...(options.maxCostUsd === undefined
@@ -802,7 +823,10 @@ export class CodexSecurity {
         mode,
         pluginVersion: runtime.plugin.version,
       };
-      const { model } = scanModelConfiguration(effectiveConfig);
+      const { model } = scanModelConfigurationForAgent(
+        this.config,
+        effectiveConfig,
+      );
       validateScanCostLimit(options.maxCostUsd, model);
       if (mode === "deep" && options.maxCostUsd !== undefined) {
         budgetRecovery = {
@@ -900,6 +924,7 @@ export class CodexSecurity {
         repo,
         normalized,
         mode,
+        configuredAgent(this.config),
         expectation.repositoryRevision,
         runtime.plugin.version,
         { ...preflightConfig, approval_policy: approvalPolicy },
@@ -1441,9 +1466,11 @@ export class CodexSecurity {
             matchFindings:
               this.#dependencies.matchFindings ??
               ((input, comparisonOptions) =>
-                matchScanFindingsInternal(input, comparisonOptions, {
-                  surface: this.#surface,
-                })),
+                matchScanFindingsInternal(
+                  input,
+                  { ...comparisonOptions, config: this.config },
+                  { surface: this.#surface },
+                )),
             environment,
             model,
             signal,
@@ -1829,11 +1856,19 @@ export class CodexSecurity {
       apiKey,
       sessionConfig,
     } = session;
+    const agent = configuredAgent(this.config);
+    const inheritedEnvironment = selectedScanEnvironment(
+      runtime.environment,
+      auth,
+      modelProvider,
+    );
     const environment: ProcessEnvironment = {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
-          selectedScanEnvironment(runtime.environment, auth, modelProvider),
+          agent === "claude"
+            ? withoutCodexProviderCredentials(inheritedEnvironment)
+            : inheritedEnvironment,
         ),
       ),
       ...(externalProvider === null
@@ -1860,22 +1895,39 @@ export class CodexSecurity {
       ? sdkCodexConfig["responses_api_metadata"]
       : {};
     const codexPathOverride =
-      environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
-      undefined
-        ? undefined
-        : this.#codexCommand().command;
-    const codex = this.#dependencies.createCodex({
-      ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
-      ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      env: definedEnvironment(selectedScanEnvironment(environment, "chatgpt")),
-      config: {
-        ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-        responses_api_metadata: {
-          ...configuredResponsesMetadata,
-          codex_security_surface: this.#surface,
+      agent === "codex" &&
+      environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") !==
+        undefined
+        ? this.#codexCommand().command
+        : undefined;
+    const overrides = this.config.codexOverrides ?? {};
+    const selection: AcpAgentSelection = {
+      agent,
+      ...(agent === "claude" && typeof overrides["model"] === "string"
+        ? { model: overrides["model"] }
+        : {}),
+      ...(agent === "claude" &&
+      typeof overrides["model_reasoning_effort"] === "string"
+        ? { reasoningEffort: overrides["model_reasoning_effort"] }
+        : {}),
+    };
+    const codex = this.#dependencies.createCodex(
+      {
+        ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
+        ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+        env: definedEnvironment(
+          selectedScanEnvironment(environment, "chatgpt"),
+        ),
+        config: {
+          ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
+          responses_api_metadata: {
+            ...configuredResponsesMetadata,
+            codex_security_surface: this.#surface,
+          },
         },
       },
-    });
+      selection,
+    );
     return { codex, environment };
   }
 
@@ -1904,15 +1956,20 @@ export class CodexSecurity {
     };
     try {
       const requestedConfig = await mergedCodexConfig(this.config);
-      const modelProvider = scanModelProvider(requestedConfig);
+      const agent = configuredAgent(this.config);
+      const modelProvider =
+        agent === "codex" ? scanModelProvider(requestedConfig) : undefined;
       const externalProvider = isExternalModelProvider(modelProvider)
         ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
         : null;
-      let authentication = scanAuthentication(
-        this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-      );
+      let authentication =
+        agent === "claude"
+          ? claudeAuthentication(options.auth)
+          : scanAuthentication(
+              this.#dependencies.environment,
+              options.auth,
+              modelProvider,
+            );
       const apiKey =
         authentication.method === "api_key"
           ? environmentApiKey(this.#dependencies.environment, modelProvider)
@@ -1922,11 +1979,14 @@ export class CodexSecurity {
           `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
         );
       }
-      const scanEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-      );
+      const scanEnvironment =
+        agent === "claude"
+          ? this.#dependencies.environment
+          : selectedScanEnvironment(
+              this.#dependencies.environment,
+              options.auth,
+              modelProvider,
+            );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
@@ -1961,6 +2021,22 @@ export class CodexSecurity {
       const effectiveConfig = runtime.effectiveConfig ?? requestedConfig;
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
+      if (agent === "claude") {
+        for (const key of [
+          "model",
+          "model_reasoning_effort",
+          "model_provider",
+          "model_providers",
+        ]) {
+          delete preflightConfig[key];
+        }
+        const overrides = this.config.codexOverrides ?? {};
+        for (const key of ["model", "model_reasoning_effort"] as const) {
+          if (typeof overrides[key] === "string") {
+            preflightConfig[key] = overrides[key];
+          }
+        }
+      }
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(runtime.configPath, preflightConfig);
       }
@@ -1980,59 +2056,63 @@ export class CodexSecurity {
         );
       }
       checkOpen();
-      if (
-        authentication.method === "stored_credentials" &&
-        this.#runtimeCredentialSource === "api_key"
-      ) {
-        const ambientHome =
-          environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
-          join(homedir(), ".codex");
-        runtime.credentialsAvailable = await importAmbientAuth(
-          ambientHome,
-          runtime.codexHome,
-        );
-        this.#runtimeCredentialSource = runtime.credentialsAvailable
-          ? "stored_credentials"
-          : null;
+      if (agent === "codex") {
+        if (
+          authentication.method === "stored_credentials" &&
+          this.#runtimeCredentialSource === "api_key"
+        ) {
+          const ambientHome =
+            environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+            join(homedir(), ".codex");
+          runtime.credentialsAvailable = await importAmbientAuth(
+            ambientHome,
+            runtime.codexHome,
+          );
+          this.#runtimeCredentialSource = runtime.credentialsAvailable
+            ? "stored_credentials"
+            : null;
+        }
       }
       if (!keepCredentialLock || runtime.deepScanConfigPath !== undefined) {
         await releaseCredentialHome?.();
         releaseCredentialHome = null;
       }
-      if (externalProvider === null && apiKey !== null) {
-        this.#runtimeCredentialSource = "api_key";
-      }
-      if (
-        !runtime.credentialsAvailable &&
-        authentication.method === "stored_credentials"
-      ) {
-        const status = await accountStatus(
-          this.#codexCommand(),
-          runtime.environment,
-          signal,
+      if (agent === "codex") {
+        if (externalProvider === null && apiKey !== null) {
+          this.#runtimeCredentialSource = "api_key";
+        }
+        if (
+          !runtime.credentialsAvailable &&
+          authentication.method === "stored_credentials"
+        ) {
+          const status = await accountStatus(
+            this.#codexCommand(),
+            runtime.environment,
+            signal,
+          );
+          runtime.credentialsAvailable = status.authenticated;
+          this.#runtimeCredentialSource = status.authenticated
+            ? "stored_credentials"
+            : null;
+        }
+        if (
+          !runtime.credentialsAvailable &&
+          apiKey === null &&
+          authentication.method !== "aws_credentials"
+        ) {
+          throw new AuthenticationRequiredError(
+            "No credentials were found. Run 'codex-security login', use " +
+              "'codex-security login --device-auth' on a remote or headless machine, or set " +
+              "OPENAI_API_KEY or CODEX_API_KEY for CI.",
+          );
+        }
+        authentication = await runtimeScanAuthentication(
+          this.#dependencies.environment,
+          runtime.codexHome,
+          options.auth,
+          modelProvider,
         );
-        runtime.credentialsAvailable = status.authenticated;
-        this.#runtimeCredentialSource = status.authenticated
-          ? "stored_credentials"
-          : null;
       }
-      if (
-        !runtime.credentialsAvailable &&
-        apiKey === null &&
-        authentication.method !== "aws_credentials"
-      ) {
-        throw new AuthenticationRequiredError(
-          "No credentials were found. Run 'codex-security login', use " +
-            "'codex-security login --device-auth' on a remote or headless machine, or set " +
-            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
-        );
-      }
-      authentication = await runtimeScanAuthentication(
-        this.#dependencies.environment,
-        runtime.codexHome,
-        options.auth,
-        modelProvider,
-      );
       if (
         options.safetyIdentifier !== undefined &&
         authentication.method !== "api_key" &&
@@ -2986,6 +3066,7 @@ function scanRecipe(
   repository: string,
   target: NormalizedTarget,
   mode: ScanMode,
+  agent: AcpAgentName,
   repositoryRevision: string | null,
   pluginVersion: string,
   preflightConfig: JsonObject,
@@ -3005,6 +3086,7 @@ function scanRecipe(
       ...(target.headRef === undefined ? {} : { headRef: target.headRef }),
     },
     mode,
+    agent,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
     config: preflightConfig,
@@ -3084,6 +3166,43 @@ async function collectResult(
     turnResult,
     sarifPath,
   });
+}
+
+function configuredAgent(config: CodexSecurityConfig): AcpAgentName {
+  const agent = config.agent ?? "codex";
+  if (!ACP_AGENT_NAMES.includes(agent)) {
+    throw new ConfigurationError(
+      `ACP agent must be one of: ${ACP_AGENT_NAMES.join(", ")}.`,
+    );
+  }
+  return agent;
+}
+
+function scanModelConfigurationForAgent(
+  config: CodexSecurityConfig,
+  effectiveConfig: Readonly<JsonObject>,
+): { model: string; reasoningEffort: string } {
+  if (configuredAgent(config) === "codex") {
+    return scanModelConfiguration(effectiveConfig);
+  }
+  const overrides = config.codexOverrides ?? {};
+  return {
+    model:
+      typeof overrides["model"] === "string" ? overrides["model"] : "default",
+    reasoningEffort:
+      typeof overrides["model_reasoning_effort"] === "string"
+        ? overrides["model_reasoning_effort"]
+        : "default",
+  };
+}
+
+function claudeAuthentication(auth: ScanAuthMode = "auto"): ScanAuthentication {
+  if (auth !== "auto") {
+    throw new ConfigurationError(
+      "Claude ACP manages its own authentication; --auth is only available with --agent codex.",
+    );
+  }
+  return { method: "agent", agent: "claude", verified: false };
 }
 
 export function scanAuthentication(

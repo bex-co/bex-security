@@ -55,11 +55,17 @@ export {
 } from "./errors.js";
 export type { ProtectedScanPathKind } from "./errors.js";
 export {
+  ACP_AGENT_NAMES,
   DEFAULT_CODEX_CONFIG,
   mergedCodexConfig,
   writeCodexConfig,
 } from "./config.js";
-export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
+export type {
+  AcpAgentName,
+  CodexSecurityConfig,
+  JsonObject,
+  JsonValue,
+} from "./config.js";
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";

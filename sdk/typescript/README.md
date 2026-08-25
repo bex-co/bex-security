@@ -111,6 +111,7 @@ Pass runtime configuration to the `CodexSecurity` constructor:
 
 | Option           | Description                                                                 |
 | ---------------- | --------------------------------------------------------------------------- |
+| `agent`          | Select `"codex"` (default) or the experimental `"claude"` ACP agent.        |
 | `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin. |
 | `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                   |
 | `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.        |
@@ -143,6 +144,19 @@ the runtime, authenticate, resolve Python, inspect the plugin, or run those
 scan-lifecycle callbacks.
 
 ## Authentication
+
+Codex remains the default agent and uses the authentication methods below. To
+run the same Bex scan workflow through Claude Code instead, use:
+
+```bash
+npx @openai/codex-security scan . --agent claude
+```
+
+Claude Code owns authentication and advertises its available models and
+reasoning levels over ACP. `--auth`, `--provider`, `--codex`, and
+`--safety-identifier` are Codex-only options. When selecting a Claude model or
+reasoning level, pass values advertised by the installed Claude agent with
+`--model` and `--effort`.
 
 For local use, sign in with ChatGPT:
 

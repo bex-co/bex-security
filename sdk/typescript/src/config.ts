@@ -10,7 +10,11 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
+export const ACP_AGENT_NAMES = ["codex", "claude"] as const;
+export type AcpAgentName = (typeof ACP_AGENT_NAMES)[number];
+
 export interface CodexSecurityConfig {
+  agent?: AcpAgentName;
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;
