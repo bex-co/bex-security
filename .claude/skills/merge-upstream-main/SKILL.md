@@ -12,7 +12,7 @@ merge. Do not rebase or rewrite `main`.
 
 1. Confirm the current repository, branch, worktree, and remotes with
    `git rev-parse --show-toplevel`, `git branch --show-current`, `git status
-   --short --branch`, and `git remote -v`.
+--short --branch`, and `git remote -v`.
 2. Continue only on `main` with a clean worktree, including no untracked files.
    Do not switch branches, stash changes, or discard work automatically. Report
    the state and ask the user how to proceed when either condition is not met.
