@@ -27,6 +27,7 @@ let configOptions = [
     options: [
       { value: "default", name: "Default" },
       { value: "sonnet", name: "Sonnet" },
+      { value: "kimi-code/k3-256k", name: "K3-256k" },
     ],
   },
   {
@@ -38,6 +39,7 @@ let configOptions = [
     options: [
       { value: "default", name: "Default" },
       { value: "high", name: "High" },
+      { value: "max", name: "Max" },
     ],
   },
 ];

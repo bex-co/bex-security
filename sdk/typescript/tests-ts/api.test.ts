@@ -43,7 +43,7 @@ import {
   classifyConnectionFailure,
   initialCredentialsAvailable,
 } from "../src/api.js";
-import type { AcpAgentSelection } from "../src/acp-codex.js";
+import type { AcpAgentSelection } from "../src/acp-adapter.js";
 import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -1286,6 +1286,121 @@ describe("CodexSecurity orchestration", () => {
     await expect(client.run(repository)).rejects.toThrow(
       "Set ZAI_API_KEY to run a Claude scan through Z.AI.",
     );
+    await client.close();
+  });
+
+  test("routes Claude ACP through Kimi with isolated model settings", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    const environment = {
+      KIMI_API_KEY: "synthetic-kimi-key",
+      ANTHROPIC_AUTH_TOKEN: "synthetic-anthropic-token",
+      CLAUDE_CODE_USE_VERTEX: "1",
+    };
+    let codexOptions: CodexOptions | null = null;
+    let agentSelection: AcpAgentSelection | undefined;
+    const client = new TestClient(
+      {
+        agent: "claude",
+        claudeProvider: "kimi",
+        codexOverrides: {
+          model: "kimi-for-coding",
+          model_reasoning_effort: "xhigh",
+        },
+      },
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options, selection) => {
+          codexOptions = options;
+          agentSelection = selection;
+          throw new Error("Kimi provider scan reached");
+        },
+      },
+    );
+
+    expect(await client.preflight(repository)).toMatchObject({
+      agent: "claude",
+      authentication: {
+        method: "api_key",
+        source: "KIMI_API_KEY",
+        verified: false,
+      },
+      model: "kimi-for-coding",
+      reasoningEffort: "xhigh",
+    });
+    await expect(client.run(repository)).rejects.toThrow(
+      "Kimi provider scan reached",
+    );
+    expect(agentSelection).toEqual({
+      agent: "claude",
+      model: "sonnet",
+      resolvedModel: "kimi-for-coding",
+      reasoningEffort: "max",
+    });
+    expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
+      ANTHROPIC_API_KEY: "synthetic-kimi-key",
+      ANTHROPIC_MODEL: "kimi-for-coding",
+      ANTHROPIC_DEFAULT_FABLE_MODEL: "kimi-for-coding",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "kimi-for-coding",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "kimi-for-coding",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "kimi-for-coding",
+      CLAUDE_CODE_SUBAGENT_MODEL: "kimi-for-coding",
+      CLAUDE_CODE_EFFORT_LEVEL: "max",
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "262144",
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "262144",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    });
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "KIMI_API_KEY",
+    );
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "ANTHROPIC_AUTH_TOKEN",
+    );
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "CLAUDE_CODE_USE_VERTEX",
+    );
+    await client.close();
+  });
+
+  test("requires KIMI_API_KEY for Claude scans through Kimi", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const client = new TestClient(
+      { agent: "claude", claudeProvider: "kimi" },
+      { environment: {} },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      "Set KIMI_API_KEY to run a Claude scan through Kimi Code.",
+    );
+    await client.close();
+  });
+
+  test("reports native Kimi authentication and model defaults", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const client = new TestClient({ agent: "kimi" }, { environment: {} });
+
+    expect(await client.preflight(repository)).toMatchObject({
+      agent: "kimi",
+      authentication: { method: "agent", agent: "kimi", verified: false },
+      model: "default",
+      reasoningEffort: "default",
+    });
     await client.close();
   });
 

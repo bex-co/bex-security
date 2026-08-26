@@ -8,7 +8,8 @@ import {
   AcpAgentClient,
   AcpCodex,
   pluginMcpServers,
-} from "../src/acp-codex.js";
+  withoutCodexProviderCredentials,
+} from "../src/acp-adapter.js";
 
 const AGENT_PATH = fileURLToPath(
   new URL("./fixtures/acp-agent.mjs", import.meta.url),
@@ -30,7 +31,7 @@ function completedMessage(events: ThreadEvent[]): string | undefined {
   return undefined;
 }
 
-describe("Codex ACP adapter", () => {
+describe("ACP adapter", () => {
   test("streams ACP messages, permissions, tools, and usage as Codex events", async () => {
     const thread = new AcpCodex({}, AGENT_PATH).startThread({
       workingDirectory: process.cwd(),
@@ -151,6 +152,28 @@ describe("Codex ACP adapter", () => {
     });
   });
 
+  test("runs native Kimi through ACP and maps Codex effort names", async () => {
+    const thread = new AcpAgentClient(
+      {},
+      {
+        agent: "kimi",
+        model: "kimi-code/k3-256k",
+        reasoningEffort: "xhigh",
+      },
+      AGENT_PATH,
+    ).startThread({ workingDirectory: process.cwd() });
+
+    const events = await collect(
+      (await thread.runStreamed("scan with Kimi")).events,
+    );
+
+    expect(thread.modelConfiguration).toEqual({
+      model: "kimi-code/k3-256k",
+      reasoningEffort: "max",
+    });
+    expect(completedMessage(events)).toBe("new:allow");
+  });
+
   test("keeps model credentials out of the Claude workbench MCP process", async () => {
     const pluginRoot = await mkdtemp(join(tmpdir(), "bex-acp-plugin-"));
     try {
@@ -166,6 +189,7 @@ describe("Codex ACP adapter", () => {
                 "OPENROUTER_API_KEY",
                 "FIREWORKS_API_KEY",
                 "ZAI_API_KEY",
+                "KIMI_API_KEY",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_AUTH_TOKEN",
                 "AWS_ACCESS_KEY_ID",
@@ -183,6 +207,7 @@ describe("Codex ACP adapter", () => {
           OPENROUTER_API_KEY: "synthetic-openrouter-key",
           FIREWORKS_API_KEY: "synthetic-fireworks-key",
           ZAI_API_KEY: "synthetic-zai-key",
+          KIMI_API_KEY: "synthetic-kimi-key",
           ANTHROPIC_API_KEY: "synthetic-anthropic-key",
           ANTHROPIC_AUTH_TOKEN: "synthetic-anthropic-token",
           AWS_ACCESS_KEY_ID: "synthetic-aws-key",
@@ -195,5 +220,15 @@ describe("Codex ACP adapter", () => {
     } finally {
       await rm(pluginRoot, { recursive: true, force: true });
     }
+  });
+
+  test("keeps Kimi credentials out of generic ACP agent environments", () => {
+    expect(
+      withoutCodexProviderCredentials({
+        PATH: "/synthetic/bin",
+        KIMI_API_KEY: "synthetic-kimi-key",
+        CODEX_API_KEY: "synthetic-codex-key",
+      }),
+    ).toEqual({ PATH: "/synthetic/bin" });
   });
 });

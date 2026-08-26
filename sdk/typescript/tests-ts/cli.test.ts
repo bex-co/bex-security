@@ -143,6 +143,55 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("stored Codex credentials");
   });
 
+  test("routes Kimi API scans through Claude ACP", async () => {
+    let config: CodexSecurityConfig | undefined;
+
+    expect(
+      await main(
+        ["scan", ".", "--agent", "claude", "--provider", "kimi", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({ onConfig: (value) => (config = value) }),
+      ),
+    ).toBe(0);
+    expect(config).toMatchObject({
+      agent: "claude",
+      claudeProvider: "kimi",
+      codexOverrides: { model: "kimi-for-coding" },
+    });
+  });
+
+  test("routes scans through native Kimi ACP", async () => {
+    let config: CodexSecurityConfig | undefined;
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--agent",
+          "kimi",
+          "--model",
+          "kimi-code/k3-256k",
+          "--effort",
+          "xhigh",
+          "--json",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({ onConfig: (value) => (config = value) }),
+      ),
+    ).toBe(0);
+    expect(config).toMatchObject({
+      agent: "kimi",
+      codexOverrides: {
+        model: "kimi-code/k3-256k",
+        model_reasoning_effort: "xhigh",
+      },
+    });
+    expect(config?.codexOverrides).not.toHaveProperty("model_provider");
+  });
+
   test("passes the safety identifier as a per-scan option", async () => {
     let options: unknown;
     const stderr = capture();
@@ -188,7 +237,7 @@ describe("CLI", () => {
       args: { properties: { repository: { type: "string" } } },
       options: {
         properties: {
-          agent: { enum: ["codex", "claude"] },
+          agent: { enum: ["codex", "claude", "kimi"] },
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
           workers: { type: "integer" },
@@ -208,6 +257,7 @@ describe("CLI", () => {
               "fireworks",
               "amazon-bedrock",
               "zai",
+              "kimi",
             ],
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
@@ -2388,10 +2438,10 @@ describe("CLI", () => {
     );
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
-      "--provider <openai|openrouter|fireworks|amazon-bedrock|zai>",
+      "--provider <openai|openrouter|fireworks|amazon-bedrock|zai|kimi>",
     );
     expect(help.text()).toContain(
-      "Agent model (default: glm-5.3[1m] for Z.AI; otherwise agent default).",
+      "Agent model (defaults: glm-5.3[1m] for Z.AI, kimi-for-coding for Kimi through Claude; otherwise agent default).",
     );
     expect(help.text()).toContain(
       "--effort <minimal|low|medium|high|xhigh|max>",
@@ -2413,6 +2463,7 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       "codex-security scan . --agent claude --provider zai",
     );
+    expect(help.text()).toContain("codex-security scan . --agent kimi");
     expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).not.toContain("codex-security scan . --path src,tests");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
@@ -2815,8 +2866,16 @@ describe("CLI", () => {
         "--provider zai requires --agent claude",
       ],
       [
+        ["scan", ".", "--provider", "kimi"],
+        "--provider kimi requires --agent claude",
+      ],
+      [
         ["scan", ".", "--agent", "claude", "--provider", "openrouter"],
-        "--agent claude supports only the native provider or --provider zai",
+        "--agent claude supports only its native provider, --provider zai, or --provider kimi",
+      ],
+      [
+        ["scan", ".", "--agent", "kimi", "--provider", "openrouter"],
+        "--agent kimi uses the provider configured by Kimi Code and does not accept --provider",
       ],
       [
         ["scan", ".", "--effort", "ultra"],

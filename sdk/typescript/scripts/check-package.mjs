@@ -163,7 +163,7 @@ const allowedRoot = new Set([
 ]);
 const distFiles = new Set(
   [
-    "acp-codex",
+    "acp-adapter",
     "api",
     "auth",
     "bulk-scan-discovery",

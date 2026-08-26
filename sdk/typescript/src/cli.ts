@@ -69,6 +69,7 @@ import {
   ACP_AGENT_NAMES,
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
+  KIMI_CLAUDE_PROVIDER,
   ZAI_CLAUDE_PROVIDER,
   isExternalModelProvider,
   mergedCodexConfig,
@@ -277,9 +278,9 @@ const PROVIDER_OPTION = z
   .default("openai")
   .describe("Inference provider for scans.");
 const SCAN_PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock", "zai"])
+  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock", "zai", "kimi"])
   .default("openai")
-  .describe("Inference provider; zai requires --agent claude.");
+  .describe("Inference provider; zai and kimi require --agent claude.");
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
@@ -963,7 +964,12 @@ interface ScanArguments extends DeepScanOptions {
   mode: ScanMode;
   model?: string;
   effort?: ScanReasoningEffort;
-  provider?: "openai" | "amazon-bedrock" | "zai" | ExternalModelProvider;
+  provider?:
+    | "openai"
+    | "amazon-bedrock"
+    | "zai"
+    | "kimi"
+    | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -2629,7 +2635,7 @@ export async function main(
           model: optionValue("--model")
             .optional()
             .describe(
-              `Agent model (default: ${ZAI_CLAUDE_PROVIDER.defaultModel} for Z.AI; otherwise agent default).`,
+              `Agent model (defaults: ${ZAI_CLAUDE_PROVIDER.defaultModel} for Z.AI, ${KIMI_CLAUDE_PROVIDER.defaultModel} for Kimi through Claude; otherwise agent default).`,
             ),
           effort: effortOption(),
           provider: SCAN_PROVIDER_OPTION,
@@ -2691,13 +2697,29 @@ export async function main(
         )
         .refine(
           (options) =>
-            options.agent === "codex" ||
+            options.agent === "claude" || options.provider !== "kimi",
+          { message: "--provider kimi requires --agent claude." },
+        )
+        .refine(
+          (options) =>
+            options.agent !== "claude" ||
             options.provider === undefined ||
             options.provider === "openai" ||
-            options.provider === "zai",
+            options.provider === "zai" ||
+            options.provider === "kimi",
           {
             message:
-              "--agent claude supports only the native provider or --provider zai.",
+              "--agent claude supports only its native provider, --provider zai, or --provider kimi.",
+          },
+        )
+        .refine(
+          (options) =>
+            options.agent !== "kimi" ||
+            options.provider === undefined ||
+            options.provider === "openai",
+          {
+            message:
+              "--agent kimi uses the provider configured by Kimi Code and does not accept --provider.",
           },
         )
         .refine(
@@ -2771,6 +2793,7 @@ export async function main(
           args: { repository: "." },
           options: { agent: "claude", provider: "zai" },
         },
+        { args: { repository: "." }, options: { agent: "kimi" } },
         { args: { repository: "." }, options: { path: ["src"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
         {
@@ -5789,13 +5812,20 @@ async function executeScan(
       resolve(directory, repository),
       arguments_.validationPromptFile,
     );
+    const claudeProvider =
+      arguments_.agent === "claude" &&
+      (arguments_.provider === "zai" || arguments_.provider === "kimi")
+        ? arguments_.provider
+        : undefined;
     const requestedModel =
-      arguments_.provider === "zai"
+      claudeProvider === "zai"
         ? arguments_.model ?? ZAI_CLAUDE_PROVIDER.defaultModel
-        : arguments_.model;
+        : claudeProvider === "kimi"
+          ? arguments_.model ?? KIMI_CLAUDE_PROVIDER.defaultModel
+          : arguments_.model;
     const config: CodexSecurityConfig = {
       agent: arguments_.agent,
-      ...(arguments_.provider === "zai" ? { claudeProvider: "zai" } : {}),
+      ...(claudeProvider === undefined ? {} : { claudeProvider }),
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
       codexOverrides:
@@ -5804,7 +5834,11 @@ async function executeScan(
           arguments_.codex,
           requestedModel,
           arguments_.effort,
-          arguments_.provider === "zai" ? undefined : arguments_.provider,
+          arguments_.agent === "codex" &&
+            arguments_.provider !== "zai" &&
+            arguments_.provider !== "kimi"
+            ? arguments_.provider
+            : undefined,
         ),
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
@@ -5812,7 +5846,7 @@ async function executeScan(
       ...DEFAULT_CODEX_CONFIG,
       ...config.codexOverrides,
     };
-    if (arguments_.agent === "claude") {
+    if (arguments_.agent !== "codex") {
       effectiveModel = requestedModel ?? "default";
       effectiveReasoningEffort = arguments_.effort ?? "default";
     } else {
@@ -5847,15 +5881,21 @@ async function executeScan(
       };
     }
     selectedAuthentication =
-      arguments_.provider === "zai"
+      claudeProvider === "zai"
         ? {
             method: "api_key",
             source: ZAI_CLAUDE_PROVIDER.envKey,
             verified: false,
           }
-        : arguments_.agent === "claude"
-          ? { method: "agent", agent: "claude", verified: false }
-          : scanAuthentication(dependencies.environment, auth, provider);
+        : claudeProvider === "kimi"
+          ? {
+              method: "api_key",
+              source: KIMI_CLAUDE_PROVIDER.envKey,
+              verified: false,
+            }
+          : arguments_.agent !== "codex"
+            ? { method: "agent", agent: arguments_.agent, verified: false }
+            : scanAuthentication(dependencies.environment, auth, provider);
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,

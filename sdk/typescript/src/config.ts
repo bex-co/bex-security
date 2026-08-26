@@ -10,7 +10,7 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
-export const ACP_AGENT_NAMES = ["codex", "claude"] as const;
+export const ACP_AGENT_NAMES = ["codex", "claude", "kimi"] as const;
 export type AcpAgentName = (typeof ACP_AGENT_NAMES)[number];
 
 export const ZAI_CLAUDE_PROVIDER = {
@@ -21,8 +21,25 @@ export const ZAI_CLAUDE_PROVIDER = {
   haikuModel: "glm-4.7",
 } as const;
 
-export const CLAUDE_MODEL_PROVIDERS = ["zai"] as const;
+export const KIMI_CLAUDE_PROVIDER = {
+  name: "Kimi Code",
+  baseUrl: "https://api.kimi.com/coding/",
+  envKey: "KIMI_API_KEY",
+  defaultModel: "kimi-for-coding",
+  standardContextTokens: 262_144,
+  extendedContextTokens: 1_048_576,
+} as const;
+
+export const CLAUDE_MODEL_PROVIDERS = ["zai", "kimi"] as const;
 export type ClaudeModelProvider = (typeof CLAUDE_MODEL_PROVIDERS)[number];
+
+export function kimiReasoningEffort(effort: string): string {
+  if (effort === "minimal" || effort === "low") return "low";
+  if (effort === "medium" || effort === "high") return "high";
+  if (effort === "xhigh" || effort === "max" || effort === "ultra")
+    return "max";
+  return effort;
+}
 
 export interface CodexSecurityConfig {
   agent?: AcpAgentName;

@@ -3,7 +3,7 @@
 **Open security workflows for every coding agent and model.**
 
 [![Upstream: openai/codex-security](https://img.shields.io/badge/upstream-openai%2Fcodex--security-111827)](https://github.com/openai/codex-security)
-[![ACP alpha](https://img.shields.io/badge/ACP-Codex%20%2B%20Claude%20alpha-7c3aed)](https://github.com/agentclientprotocol)
+[![ACP alpha](https://img.shields.io/badge/ACP-Codex%20%2B%20Claude%20%2B%20Kimi%20alpha-7c3aed)](https://github.com/agentclientprotocol)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Bex Security is an upstream-first fork of
@@ -58,7 +58,8 @@ bex-security --help
 Bex Security is an early-stage fork. The current codebase preserves the
 upstream package name and CLI behavior so existing workflows keep working. Its
 first ACP vertical slice runs Codex sessions through `codex-acp`, and its first
-pluggable agent integration runs Claude Code through `claude-agent-acp`.
+pluggable agent integrations run Claude Code through `claude-agent-acp` and
+Kimi Code through its native `kimi acp` server.
 
 | Capability                                       | Status                            |
 | ------------------------------------------------ | --------------------------------- |
@@ -67,6 +68,8 @@ pluggable agent integration runs Claude Code through `claude-agent-acp`.
 | Repeatable upstream merge workflow               | Available                         |
 | Codex sessions over ACP v1 and `codex-acp`       | Alpha                             |
 | Claude Code sessions over `claude-agent-acp`     | Alpha                             |
+| Kimi Code sessions over native `kimi acp`        | Alpha                             |
+| Kimi models through Claude Code                  | Alpha                             |
 | Additional ACP agents                            | Contributors welcome              |
 | Bex-branded CLI (`bex-security`)                 | Available                         |
 | Bex-branded npm package                          | Planned with a compatibility path |
@@ -100,6 +103,7 @@ flowchart TB
         codexAcp["codex-acp agent (current subprocess)"]
         codex["Codex app-server + security plugin (current subprocess)"]
         claudeAcp["claude-agent-acp + Claude Code (current subprocess)"]
+        kimiAcp["Kimi Code native ACP (current subprocess)"]
         acp["additional compatible ACP agent (future subprocess)"]
     end
 
@@ -114,6 +118,7 @@ flowchart TB
     runtime --> acpAdapter
     acpAdapter <-->|bidirectional ACP v1 over stdio| codexAcp
     acpAdapter <-->|same ACP v1 transport| claudeAcp
+    acpAdapter <-->|same ACP v1 transport| kimiAcp
     codexAcp <-->|Codex app-server JSON-RPC| codex
     acpAdapter -.->|future capability-tested driver| acp
     acpAdapter --> gateway
@@ -121,18 +126,20 @@ flowchart TB
     gateway -->|draft writes| artifacts
     gateway -->|stdio MCP tools| workbench
     claudeAcp -->|Claude-owned model configuration| model
+    kimiAcp -->|Kimi-owned model configuration| model
     codex -->|provider-specific API| model
     acp -->|agent-owned model configuration| model
 ```
 
 The adapter makes Bex the ACP client and selects a small agent driver for
-`codex-acp` or `claude-agent-acp`. Bex launches the selected agent per turn,
-negotiates ACP v1, creates or resumes its session, streams protocol updates into
-the existing scan observers, forwards cancellation, and preserves the current
-noninteractive permission boundary. The agent still owns model authentication
-and access; Bex continues to own scan scope, the workflow, workbench tools, and
-artifact validation. This keeps the integration small enough to track upstream
-while proving that orchestration is independent of one agent transport.
+`codex-acp`, `claude-agent-acp`, or native `kimi acp`. Bex launches the selected
+agent per turn, negotiates ACP v1, creates or resumes its session, streams
+protocol updates into the existing scan observers, forwards cancellation, and
+preserves the current noninteractive permission boundary. The agent still owns
+model authentication and access; Bex continues to own scan scope, the workflow,
+workbench tools, and artifact validation. This keeps the integration small
+enough to track upstream while proving that orchestration is independent of one
+agent transport.
 
 The adapter boundary is capability-based rather than Codex-shaped. A new agent
 must prove that it can run the same scoped workflow and produce artifacts that
@@ -217,6 +224,32 @@ your Claude Code settings or store the API key. See the
 [Z.AI Claude Code guide](https://docs.z.ai/devpack/tool/claude) for account and
 model availability details.
 
+Kimi is available either as a model provider behind Claude Code or as a native
+ACP agent. The Claude provider path uses a Kimi API key and defaults to
+`kimi-for-coding`:
+
+```bash
+export KIMI_API_KEY="<your-kimi-api-key>"
+./bex-security scan . --agent claude --provider kimi
+./bex-security scan . --agent claude --provider kimi --model k3-256k
+```
+
+For the native path, install Kimi Code, make sure `kimi` is on `PATH`, and log
+in once before scanning:
+
+```bash
+kimi login
+./bex-security scan . --agent kimi
+./bex-security scan . --agent kimi --model kimi-code/k3-256k --effort high
+```
+
+The native agent uses Kimi Code's saved authentication and provider settings.
+Bex starts `kimi acp`, forwards its security workbench over ACP, and reports the
+model and thinking level negotiated by Kimi. See the
+[Kimi Code installation guide](https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started.html),
+[Kimi ACP reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp),
+and [Kimi Claude Code guide](https://www.kimi.com/code/docs/en/third-party-tools/claude-code.html).
+
 Codex remains the default agent. Sign in with ChatGPT or provide an API key:
 
 ```bash
@@ -233,6 +266,8 @@ Common scan commands:
 ./bex-security scan . --model gpt-5.6-terra --effort high
 ./bex-security scan . --agent claude
 ./bex-security scan . --agent claude --provider zai --model glm-5.3
+./bex-security scan . --agent claude --provider kimi
+./bex-security scan . --agent kimi
 ./bex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 ./bex-security scan . --validation-prompt-file validation.md
 ./bex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
@@ -240,7 +275,9 @@ Common scan commands:
 
 For CI with Codex, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing
 in. `--agent claude` delegates authentication and model discovery to the local
-Claude Code installation. The default remains `--agent codex`; saved scan
+Claude Code installation unless a provider is selected. `--agent kimi`
+delegates both to the local Kimi Code installation. The default remains
+`--agent codex`; saved scan
 recipes created before agent selection also replay with Codex.
 
 Use `--validation-prompt-file` to replace final validation with your own setup,

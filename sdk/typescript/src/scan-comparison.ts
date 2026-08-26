@@ -8,7 +8,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
-import { AcpAgentClient, AcpCodex } from "./acp-codex.js";
+import { AcpAgentClient, AcpCodex } from "./acp-adapter.js";
 import type { CodexSecuritySurface } from "./api.js";
 import { accountStatus } from "./auth.js";
 import {

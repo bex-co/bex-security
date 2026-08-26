@@ -35,7 +35,7 @@ import {
   AcpAgentClient,
   type AcpAgentSelection,
   withoutCodexProviderCredentials,
-} from "./acp-codex.js";
+} from "./acp-adapter.js";
 import {
   jsonForPrompt,
   pluginPythonCommand,
@@ -45,8 +45,10 @@ import {
   ACP_AGENT_NAMES,
   CLAUDE_MODEL_PROVIDERS,
   EXTERNAL_CODEX_PROVIDERS,
+  KIMI_CLAUDE_PROVIDER,
   ZAI_CLAUDE_PROVIDER,
   isExternalModelProvider,
+  kimiReasoningEffort,
   mergedCodexConfig,
   scanApprovalPolicy,
   scanModelConfiguration,
@@ -288,7 +290,7 @@ export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 export type ScanAuthentication =
   | {
       method: "agent";
-      agent: "claude";
+      agent: "claude" | "kimi";
       verified: false;
     }
   | {
@@ -298,7 +300,8 @@ export type ScanAuthentication =
         | "CODEX_API_KEY"
         | "OPENROUTER_API_KEY"
         | "FIREWORKS_API_KEY"
-        | "ZAI_API_KEY";
+        | "ZAI_API_KEY"
+        | "KIMI_API_KEY";
       verified: false;
     }
   | {
@@ -626,9 +629,10 @@ export class CodexSecurity {
       outputDir: inputs.outputDir,
       ...(archiveDir === null ? {} : { archiveDir }),
       authentication:
-        agent === "claude"
-          ? claudeAuthentication(
+        agent !== "codex"
+          ? acpAgentAuthentication(
               options.auth,
+              agent,
               configuredClaudeProvider(this.config),
             )
           : scanAuthentication(
@@ -1873,11 +1877,11 @@ export class CodexSecurity {
     } = session;
     const agent = configuredAgent(this.config);
     const claudeProvider = configuredClaudeProvider(this.config);
-    const claudeModel =
+    const claudeConfiguration =
       agent === "claude"
         ? scanModelConfigurationForAgent(this.config, session.effectiveConfig)
-            .model
         : undefined;
+    const claudeModel = claudeConfiguration?.model;
     const inheritedEnvironment = selectedScanEnvironment(
       runtime.environment,
       auth,
@@ -1887,7 +1891,7 @@ export class CodexSecurity {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
-          agent === "claude"
+          agent !== "codex"
             ? withoutCodexProviderCredentials(inheritedEnvironment)
             : inheritedEnvironment,
         ),
@@ -1900,6 +1904,13 @@ export class CodexSecurity {
     };
     if (claudeProvider === "zai") {
       environment = zaiClaudeEnvironment(environment, apiKey!, claudeModel!);
+    } else if (claudeProvider === "kimi") {
+      environment = kimiClaudeEnvironment(
+        environment,
+        apiKey!,
+        claudeModel!,
+        claudeConfiguration!.reasoningEffort,
+      );
     }
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
@@ -1927,17 +1938,22 @@ export class CodexSecurity {
     const overrides = this.config.codexOverrides ?? {};
     const selection: AcpAgentSelection = {
       agent,
-      ...(agent === "claude" && claudeProvider === "zai"
+      ...(agent === "claude" && claudeProvider !== undefined
         ? {
             model: "sonnet",
             resolvedModel: claudeModel!,
           }
-        : agent === "claude" && typeof overrides["model"] === "string"
+        : agent !== "codex" && typeof overrides["model"] === "string"
           ? { model: overrides["model"] }
           : {}),
-      ...(agent === "claude" &&
+      ...(agent !== "codex" &&
       typeof overrides["model_reasoning_effort"] === "string"
-        ? { reasoningEffort: overrides["model_reasoning_effort"] }
+        ? {
+            reasoningEffort:
+              claudeProvider === "kimi"
+                ? kimiReasoningEffort(overrides["model_reasoning_effort"])
+                : overrides["model_reasoning_effort"],
+          }
         : {}),
     };
     const codex = this.#dependencies.createCodex(
@@ -1995,25 +2011,31 @@ export class CodexSecurity {
         ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
         : null;
       let authentication =
-        agent === "claude"
-          ? claudeAuthentication(options.auth, claudeProvider)
+        agent !== "codex"
+          ? acpAgentAuthentication(options.auth, agent, claudeProvider)
           : scanAuthentication(
               this.#dependencies.environment,
               options.auth,
               modelProvider,
             );
-      const apiKey =
+      const providerConfiguration =
         claudeProvider === "zai"
+          ? ZAI_CLAUDE_PROVIDER
+          : claudeProvider === "kimi"
+            ? KIMI_CLAUDE_PROVIDER
+            : null;
+      const apiKey =
+        providerConfiguration !== null
           ? environmentValue(
               this.#dependencies.environment,
-              ZAI_CLAUDE_PROVIDER.envKey,
+              providerConfiguration.envKey,
             )?.trim() ?? null
           : authentication.method === "api_key"
             ? environmentApiKey(this.#dependencies.environment, modelProvider)
             : null;
-      if (claudeProvider === "zai" && apiKey === null) {
+      if (providerConfiguration !== null && apiKey === null) {
         throw new AuthenticationRequiredError(
-          `Set ${ZAI_CLAUDE_PROVIDER.envKey} to run a Claude scan through ${ZAI_CLAUDE_PROVIDER.name}.`,
+          `Set ${providerConfiguration.envKey} to run a Claude scan through ${providerConfiguration.name}.`,
         );
       }
       if (externalProvider !== null && apiKey === null) {
@@ -2022,7 +2044,7 @@ export class CodexSecurity {
         );
       }
       const scanEnvironment =
-        agent === "claude"
+        agent !== "codex"
           ? this.#dependencies.environment
           : selectedScanEnvironment(
               this.#dependencies.environment,
@@ -2063,7 +2085,7 @@ export class CodexSecurity {
       const effectiveConfig = runtime.effectiveConfig ?? requestedConfig;
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
-      if (agent === "claude") {
+      if (agent !== "codex") {
         for (const key of [
           "model",
           "model_reasoning_effort",
@@ -3268,7 +3290,9 @@ function scanModelConfigurationForAgent(
         ? overrides["model"]
         : configuredClaudeProvider(config) === "zai"
           ? ZAI_CLAUDE_PROVIDER.defaultModel
-          : "default",
+          : configuredClaudeProvider(config) === "kimi"
+            ? KIMI_CLAUDE_PROVIDER.defaultModel
+            : "default",
     reasoningEffort:
       typeof overrides["model_reasoning_effort"] === "string"
         ? overrides["model_reasoning_effort"]
@@ -3276,13 +3300,14 @@ function scanModelConfigurationForAgent(
   };
 }
 
-function claudeAuthentication(
+function acpAgentAuthentication(
   auth: ScanAuthMode = "auto",
+  agent: Exclude<AcpAgentName, "codex">,
   provider?: ClaudeModelProvider,
 ): ScanAuthentication {
   if (auth !== "auto") {
     throw new ConfigurationError(
-      "Claude ACP manages its own authentication; --auth is only available with --agent codex.",
+      `${agent === "claude" ? "Claude" : "Kimi"} ACP manages its own authentication; --auth is only available with --agent codex.`,
     );
   }
   if (provider === "zai") {
@@ -3292,7 +3317,14 @@ function claudeAuthentication(
       verified: false,
     };
   }
-  return { method: "agent", agent: "claude", verified: false };
+  if (provider === "kimi") {
+    return {
+      method: "api_key",
+      source: KIMI_CLAUDE_PROVIDER.envKey,
+      verified: false,
+    };
+  }
+  return { method: "agent", agent, verified: false };
 }
 
 function zaiClaudeEnvironment(
@@ -3332,6 +3364,56 @@ function zaiClaudeEnvironment(
     ...(model.includes("[1m]")
       ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000" }
       : {}),
+  };
+}
+
+function kimiClaudeEnvironment(
+  environment: ProcessEnvironment,
+  apiKey: string,
+  model: string,
+  reasoningEffort: string,
+): ProcessEnvironment {
+  const replaced = new Set([
+    "KIMI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_EFFORT_LEVEL",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+  ]);
+  const contextTokens = model.includes("[1m]")
+    ? KIMI_CLAUDE_PROVIDER.extendedContextTokens
+    : KIMI_CLAUDE_PROVIDER.standardContextTokens;
+  return {
+    ...Object.fromEntries(
+      Object.entries(environment).filter(
+        ([name]) => !replaced.has(name.toUpperCase()),
+      ),
+    ),
+    ANTHROPIC_BASE_URL: KIMI_CLAUDE_PROVIDER.baseUrl,
+    ANTHROPIC_API_KEY: apiKey,
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_FABLE_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
+    CLAUDE_CODE_EFFORT_LEVEL: kimiReasoningEffort(reasoningEffort),
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(contextTokens),
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contextTokens),
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
   };
 }
 

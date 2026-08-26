@@ -19,7 +19,7 @@ import {
   AcpAgentClient,
   AcpCodex,
   type AcpAgentSelection,
-} from "../src/acp-codex.js";
+} from "../src/acp-adapter.js";
 import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import {
   comparisonEnvironment,

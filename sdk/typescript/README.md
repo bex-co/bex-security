@@ -110,13 +110,13 @@ responses reject the promise.
 
 Pass runtime configuration to the `CodexSecurity` constructor:
 
-| Option           | Description                                                                 |
-| ---------------- | --------------------------------------------------------------------------- |
-| `agent`          | Select `"codex"` (default) or the experimental `"claude"` ACP agent.        |
-| `claudeProvider` | Select `"zai"` to route the Claude agent through Z.AI.                      |
-| `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin. |
-| `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                   |
-| `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.        |
+| Option           | Description                                                                     |
+| ---------------- | ------------------------------------------------------------------------------- |
+| `agent`          | Select `"codex"` (default), `"claude"`, or the experimental `"kimi"` ACP agent. |
+| `claudeProvider` | Select `"zai"` or `"kimi"` to route the Claude agent through that provider.     |
+| `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin.     |
+| `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                       |
+| `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.            |
 
 Pass scan configuration to `security.run(repository, options)` or
 `security.preflight(repository, options)`:
@@ -156,7 +156,7 @@ npx @openai/codex-security scan . --agent claude
 
 Claude Code owns authentication and advertises its available models and
 reasoning levels over ACP. `--auth`, `--codex`, and `--safety-identifier` are
-Codex-only options. Claude supports its native provider and Z.AI; other
+Codex-only options. Claude supports its native provider, Z.AI, and Kimi; other
 `--provider` values remain Codex-only. When selecting a native Claude model or
 reasoning level, pass values advertised by the installed Claude agent with
 `--model` and `--effort`.
@@ -173,6 +173,32 @@ model supported by your Z.AI account) to override it. The provider settings and
 credential apply only to the Claude ACP subprocess. See the
 [Z.AI Claude Code guide](https://docs.z.ai/devpack/tool/claude) for account and
 model availability details.
+
+To run Kimi models through the Claude ACP agent, set a Kimi API key. This path
+defaults to `kimi-for-coding` and accepts `--model k3-256k` or another model
+available to the account:
+
+```bash
+export KIMI_API_KEY="<your-kimi-api-key>"
+npx @openai/codex-security scan . --agent claude --provider kimi
+```
+
+The provider credential and Anthropic-compatible settings are scoped to the
+Claude subprocess and are not written to Claude Code configuration. See the
+[Kimi Claude Code guide](https://www.kimi.com/code/docs/en/third-party-tools/claude-code.html).
+
+Kimi Code can also run as the ACP agent itself. Install it, put `kimi` on
+`PATH`, and authenticate once:
+
+```bash
+kimi login
+npx @openai/codex-security scan . --agent kimi
+npx @openai/codex-security scan . --agent kimi --model kimi-code/k3-256k --effort high
+```
+
+Native Kimi uses its saved provider configuration and reports its negotiated
+model and thinking level over ACP. See the
+[Kimi ACP reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp).
 
 For local use, sign in with ChatGPT:
 
