@@ -1,17 +1,21 @@
-<!-- release-version: 0.1.20-bex.1 -->
+<!-- release-version: 0.1.23-bex.1 -->
 
-# Bex Security 0.1.20-bex.1
+# Bex Security 0.1.23-bex.1
 
-This is the first public `@bex-co/bex-security` release. It packages the
-Bex-branded CLI and TypeScript SDK while preserving `codex-security` as a
-compatibility command.
+This release updates Bex Security to the Codex Security 0.1.23 baseline while
+preserving the Bex-branded multi-agent CLI and TypeScript SDK. The
+`codex-security` command remains available as a compatibility alias.
 
 Highlights:
 
-- Run the same evidence-backed security workflow with Codex, Claude Code, Kimi
-  Code, or Muse Code through ACP.
-- Use the `bex-security` command from npm without cloning the repository.
-- Receive Bex release update notices from the `@bex-co/bex-security` package.
-- Track the upstream Codex Security baseline directly in package metadata.
+- Follow durable deep-scan progress while using Codex, Claude Code, Kimi Code,
+  or Muse Code through ACP.
+- Run the preview findings service and dashboard, publish completed findings,
+  and review potential duplicate groups.
+- Import GitHub code-scanning alerts and CSV findings for local validation or
+  triage.
+- Assess patch risk and benefit from upstream scan recovery, packaging, and
+  Windows reliability improvements.
 
-Upstream base: `@openai/codex-security@0.1.20`.
+Upstream base: `@openai/codex-security@0.1.23`
+(`047414649cc19afe4817c751a5d5c574b8108b81`).
