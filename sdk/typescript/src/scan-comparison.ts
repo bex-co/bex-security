@@ -26,8 +26,17 @@ import {
   runCodexCommand,
   type CodexCommand,
 } from "./runtime.js";
+import {
+  CODEX_SECURITY_THREAD_SOURCES,
+  type CodexSecurityThreadSource,
+} from "./thread-source.js";
 
 type Finding = { occurrenceId: string } & Record<string, unknown>;
+type ReadOnlyCodexThreadSource = Extract<
+  CodexSecurityThreadSource,
+  | typeof CODEX_SECURITY_THREAD_SOURCES.scan
+  | typeof CODEX_SECURITY_THREAD_SOURCES.scanComparison
+>;
 
 export interface ScanComparisonInput {
   before: readonly Finding[];
@@ -117,7 +126,10 @@ export async function matchScanFindingsInternal(
     comparisonPrompt(input),
     z.toJSONSchema(comparisonSchema, { target: "openapi-3.0" }),
     options,
-    runtimeOptions,
+    {
+      ...runtimeOptions,
+      threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
+    },
   );
   const response = parseComparisonJson(finalResponse);
   return validateComparison(
@@ -150,7 +162,10 @@ export async function runReadOnlyCodex(
   prompt: string,
   outputSchema: unknown,
   options: ReadOnlyCodexOptions,
-  runtimeOptions: { surface: CodexSecuritySurface },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    threadSource: ReadOnlyCodexThreadSource;
+  },
 ): Promise<string> {
   const agent = options.config?.agent ?? "codex";
   const config =
@@ -243,6 +258,7 @@ export async function runReadOnlyCodex(
           } as NonNullable<CodexOptions["config"]>,
         }));
   const thread = codex.startThread({
+    threadSource: runtimeOptions.threadSource,
     ...(agent === "codex" && model !== undefined ? { model } : {}),
     ...(agent === "codex" && reasoningEffort !== undefined
       ? { modelReasoningEffort: reasoningEffort }
@@ -261,7 +277,7 @@ export async function runReadOnlyCodex(
   return turn.finalResponse;
 }
 
-async function disabledMcpServers(
+export async function disabledMcpServers(
   command: CodexCommand,
   config: JsonObject | undefined,
   environment: Record<string, string>,

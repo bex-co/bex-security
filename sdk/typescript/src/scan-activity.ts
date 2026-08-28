@@ -145,6 +145,20 @@ export function scanReviewEvidenceFromEvent(
 
 function displayCommand(command: string): string {
   const normalized = command.replaceAll(/\s+/gu, " ").trim();
+  const powershell =
+    process.platform === "win32"
+      ? /^(?:"([^"]+)"|([^\s"'|;&<>]+))\s+(?:-NoProfile\s+)?-Command\s+(['"])(.*)\3$/iu.exec(
+          normalized,
+        )
+      : null;
+  if (
+    powershell !== null &&
+    /(?:^|[\\/])(?:powershell|pwsh)(?:\.exe)?$/iu.test(
+      powershell[1] ?? powershell[2]!,
+    )
+  ) {
+    return powershell[4]!;
+  }
   const match =
     /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/u.exec(
       normalized,
@@ -390,13 +404,21 @@ function commandRepositoryPaths(
   const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     const value = shellTokenValue(token, repository.includes("\\"));
+    const normalizedValue =
+      process.platform === "win32" &&
+      !(token.startsWith("'") && token.endsWith("'"))
+        ? value.replace(
+            /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
+            "$CODEX_SECURITY_REPOSITORY/",
+          )
+        : value;
     for (const prefix of [
       "$CODEX_SECURITY_REPOSITORY/",
       "${CODEX_SECURITY_REPOSITORY}/",
       `${repositoryPrefix}/`,
     ]) {
-      if (!value.startsWith(prefix)) continue;
-      const path = value
+      if (!normalizedValue.startsWith(prefix)) continue;
+      const path = normalizedValue
         .slice(prefix.length)
         .replace(/["'\r\n].*$/u, "")
         .trim()

@@ -5,3 +5,6 @@ auditConfig:
   ignoreGhsas:
     # extractPluginZip rejects every symlink entry before extract-zip creates it.
     - GHSA-jmr9-qjv8-65gv
+
+allowBuilds:
+  esbuild: false

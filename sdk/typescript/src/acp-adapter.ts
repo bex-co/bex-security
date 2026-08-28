@@ -196,7 +196,7 @@ export class AcpAgentThread {
     const stderr = collectStream(child.stderr);
     const stream = ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+      Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
     );
     try {
       return await client({ name: "bex-security" }).connectWith(
@@ -283,7 +283,7 @@ export class AcpAgentThread {
     const stderr = collectStream(child.stderr);
     const stream = ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+      Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
     );
     const operation = client({ name: "bex-security" })
       .onRequest(methods.client.session.requestPermission, ({ params }) =>
