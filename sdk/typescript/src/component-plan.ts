@@ -15,6 +15,7 @@ import {
   normalizeTarget,
   validatedGitEnvironment,
 } from "./targets.js";
+import { pathIsWithin } from "./path-scope.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -98,7 +99,7 @@ export async function planComponents(
   const selected = plan.components.flatMap(({ paths }) => paths);
   for (let index = 0; index < selected.length; index++) {
     const path = selected[index]!;
-    if (!files.some((file) => containsPath(path, file))) {
+    if (!files.some((file) => pathIsWithin(file, path))) {
       throw new Error(
         `Automatic component plan selected a path outside its file inventory: ${path}.`,
       );
@@ -106,7 +107,7 @@ export async function planComponents(
     if (
       selected
         .slice(index + 1)
-        .some((other) => containsPath(path, other) || containsPath(other, path))
+        .some((other) => pathIsWithin(other, path) || pathIsWithin(path, other))
     ) {
       throw new Error(
         `Automatic component plan has overlapping paths: ${path}. Choose the paths with --component or --components-file.`,
@@ -114,7 +115,7 @@ export async function planComponents(
     }
   }
   const uncovered = files.filter(
-    (file) => !selected.some((path) => containsPath(path, file)),
+    (file) => !selected.some((path) => pathIsWithin(file, path)),
   );
   if (uncovered.length > 0) {
     const remainingCounts = directoryCounts(uncovered);
@@ -135,10 +136,6 @@ export async function planComponents(
   return await normalizeComponentPlan(repository, plan, options.signal);
 }
 
-function containsPath(parent: string, child: string): boolean {
-  return parent === "." || child === parent || child.startsWith(`${parent}/`);
-}
-
 function directoryCounts(files: readonly string[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const file of files) {
@@ -154,7 +151,8 @@ function directoryCounts(files: readonly string[]): Map<string, number> {
   return counts;
 }
 
-async function inventoryFiles(
+/** @internal Authoritative regular-file inventory used by host orchestration. */
+export async function inventoryFiles(
   repository: string,
   signal?: AbortSignal,
 ): Promise<string[]> {

@@ -17,6 +17,9 @@ importers:
       '@agentclientprotocol/sdk':
         specifier: 1.4.0
         version: 1.4.0(zod@4.4.3)
+      '@bex-co/muse-code-acp':
+        specifier: 0.1.1
+        version: 0.1.1
       '@inquirer/prompts':
         specifier: 8.3.0
         version: 8.3.0(@types/node@22.19.17)
@@ -346,6 +349,11 @@ packages:
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
+
+  '@bex-co/muse-code-acp@0.1.1':
+    resolution: {integrity: sha512-HE9yRAqlEhbJxFKSQropko4ThNytNcsIQVpAsjswx1w8GcZAGKf6FZdH6wBPrBzErMuAb70VMcLpEq2+8AQOvw==}
+    engines: {node: '>=22'}
+    hasBin: true
 
   '@cfworker/json-schema@4.1.1':
     resolution: {integrity: sha512-gAmrUZSGtKc3AiBL71iNWxDsyUC5uMaKKGdvzYsBoTW/xi42JQHl7eKV2OYzCUqvc+D2RCcf7EXY2iCyFIk6og==}
@@ -2083,6 +2091,11 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
+  '@bex-co/muse-code-acp@0.1.1':
+    dependencies:
+      '@agentclientprotocol/sdk': 1.3.0(zod@4.4.3)
+      zod: 4.4.3
+
   '@cfworker/json-schema@4.1.1': {}
 
   '@graphql-typed-document-node/core@3.2.0(graphql@17.0.2)':
@@ -2561,7 +2574,7 @@ snapshots:
   body-parser@2.3.0:
     dependencies:
       bytes: 3.1.2
-      content-type: 2.0.0
+      content-type: 2.1.0
       debug: 4.4.3
       http-errors: 2.0.1
       iconv-lite: 0.7.3
@@ -2773,7 +2786,7 @@ snapshots:
       once: 1.4.0
       parseurl: 1.3.3
       proxy-addr: 2.0.7
-      qs: 6.15.1
+      qs: 6.15.3
       range-parser: 1.3.0
       router: 2.2.0
       send: 1.2.1
@@ -3350,7 +3363,7 @@ snapshots:
 
   type-is@2.1.0:
     dependencies:
-      content-type: 2.0.0
+      content-type: 2.1.0
       media-typer: 1.1.1
       mime-types: 3.0.2
 

@@ -2723,6 +2723,16 @@ export async function main(
           },
         )
         .refine(
+          (options) =>
+            options.agent !== "muse" ||
+            options.provider === undefined ||
+            options.provider === "openai",
+          {
+            message:
+              "--agent muse uses the provider configured by Muse Code and does not accept --provider.",
+          },
+        )
+        .refine(
           (options) => options.agent === "codex" || options.codex.length === 0,
           { message: "--codex is only available with --agent codex." },
         )
@@ -2794,6 +2804,7 @@ export async function main(
           options: { agent: "claude", provider: "zai" },
         },
         { args: { repository: "." }, options: { agent: "kimi" } },
+        { args: { repository: "." }, options: { agent: "muse" } },
         { args: { repository: "." }, options: { path: ["src"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
         {
@@ -4197,7 +4208,10 @@ function scanArgumentsFromRecipe(
     );
   }
   const agent = recipe["agent"] ?? "codex";
-  if (agent !== "codex" && agent !== "claude") {
+  if (
+    typeof agent !== "string" ||
+    !ACP_AGENT_NAMES.includes(agent as AcpAgentName)
+  ) {
     throw new CodexSecurityError(
       "The saved scan recipe contains an invalid ACP agent.",
     );
@@ -4263,7 +4277,7 @@ function scanArgumentsFromRecipe(
     );
   }
   return {
-    agent,
+    agent: agent as AcpAgentName,
     repository,
     paths,
     knowledgeBasePaths,
@@ -5936,7 +5950,8 @@ async function executeScan(
           model: effectiveModel,
           reasoningEffort: effectiveReasoningEffort,
         },
-        usageAtCompletion: arguments_.agent === "claude",
+        usageAtCompletion:
+          arguments_.agent === "claude" || arguments_.agent === "muse",
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),
@@ -6076,6 +6091,14 @@ async function executeScan(
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        const agentName =
+          authentication.method !== "agent"
+            ? null
+            : authentication.agent === "claude"
+              ? "Claude Code"
+              : authentication.agent === "kimi"
+                ? "Kimi Code"
+                : "Muse Code";
         diagnostic("authentication.selected", {
           requested: auth ?? "auto",
           method: authentication.method,
@@ -6093,7 +6116,7 @@ async function executeScan(
               : authentication.method === "aws_credentials"
                 ? `Using AWS credentials from ${authentication.source}`
                 : authentication.method === "agent"
-                  ? "Using Claude agent authentication"
+                  ? `Using ${agentName} authentication`
                   : "Using stored Codex credentials",
           );
           return;
@@ -6111,7 +6134,7 @@ async function executeScan(
             `Authentication: AWS credentials from ${authentication.source}.`,
           );
         } else if (authentication.method === "agent") {
-          progress?.stage("Authentication: managed by Claude Agent.");
+          progress?.stage(`Authentication: managed by ${agentName}.`);
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
@@ -6204,6 +6227,7 @@ async function executeScan(
           diagnostic("worker.preflight", {
             delegation: status.delegation,
             configured_slots: status.configuredSlots,
+            fallback: status.fallback,
           });
         } else {
           diagnostic("worker.phase", {
@@ -6977,6 +7001,9 @@ export function parseCodexOverrides(
 function workerStatusMessage(status: ScanWorkerStatus): string | null {
   if (status.kind === "preflight") {
     if (status.delegation === "unavailable") {
+      if (status.fallback === "host") {
+        return `Preflight: worker delegation unavailable; using ${status.configuredSlots ?? "bounded"} host-managed review assignments.`;
+      }
       return "Preflight: worker delegation unavailable; continuing without delegated workers.";
     }
     if (status.delegation === "unknown") {

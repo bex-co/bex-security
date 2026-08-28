@@ -28,6 +28,7 @@ let configOptions = [
       { value: "default", name: "Default" },
       { value: "sonnet", name: "Sonnet" },
       { value: "kimi-code/k3-256k", name: "K3-256k" },
+      { value: "muse-spark-1.2", name: "Muse Spark 1.2" },
     ],
   },
   {
@@ -44,22 +45,59 @@ let configOptions = [
   },
 ];
 
+if (process.env.BEX_TEST_AGENT === "muse") {
+  configOptions = configOptions.filter((option) => option.category !== "mode");
+}
+
 const app = agent({ name: "bex-security-test-agent" })
   .onRequest(methods.agent.initialize, () => ({
     protocolVersion: PROTOCOL_VERSION,
     agentCapabilities: {
       sessionCapabilities: { resume: {} },
     },
+    ...(process.env.BEX_TEST_AGENT === "muse"
+      ? {
+          _meta: {
+            "bex.security/capabilities": {
+              delegatedWorkers: false,
+              usage: "unavailable",
+              interactivePermissions: false,
+            },
+          },
+        }
+      : {}),
   }))
-  .onRequest(methods.agent.session.new, () => ({
-    sessionId: "thread-acp",
-    configOptions,
-  }))
+  .onRequest(methods.agent.session.new, ({ params }) => {
+    if (
+      process.env.BEX_TEST_EXPECT_CWD &&
+      params.cwd !== process.env.BEX_TEST_EXPECT_CWD
+    ) {
+      throw new Error(`unexpected cwd: ${params.cwd}`);
+    }
+    if (
+      process.env.BEX_TEST_EXPECT_MCP_NAME &&
+      params.mcpServers[0]?.name !== process.env.BEX_TEST_EXPECT_MCP_NAME
+    ) {
+      throw new Error(`unexpected MCP name: ${params.mcpServers[0]?.name}`);
+    }
+    return {
+      sessionId: "thread-acp",
+      configOptions,
+    };
+  })
   .onRequest(methods.agent.session.resume, () => {
     resumed = true;
     return { configOptions };
   })
-  .onRequest(methods.agent.session.setMode, () => ({}))
+  .onRequest(methods.agent.session.setMode, ({ params }) => {
+    if (
+      process.env.BEX_TEST_EXPECT_MODE &&
+      params.modeId !== process.env.BEX_TEST_EXPECT_MODE
+    ) {
+      throw new Error(`unexpected mode: ${params.modeId}`);
+    }
+    return {};
+  })
   .onRequest(methods.agent.session.setConfigOption, ({ params }) => {
     configOptions = configOptions.map((option) =>
       option.id === params.configId
@@ -75,6 +113,14 @@ const app = agent({ name: "bex-security-test-agent" })
         .filter((block) => block.type === "text")
         .map((block) => block.text)
         .join("");
+      if (
+        process.env.BEX_TEST_EXPECT_PROMPT &&
+        !text.includes(process.env.BEX_TEST_EXPECT_PROMPT)
+      ) {
+        throw new Error(
+          `prompt did not contain: ${process.env.BEX_TEST_EXPECT_PROMPT}`,
+        );
+      }
       if (text === "wait for cancellation") {
         if (!signal.aborted) {
           await new Promise((resolve) =>
@@ -107,7 +153,9 @@ const app = agent({ name: "bex-security-test-agent" })
           title: "printf test",
           kind: "execute",
           status: "in_progress",
-          rawInput: { command: "printf test", cwd: process.cwd() },
+          ...(process.env.BEX_TEST_AGENT === "muse"
+            ? { rawInput: { command: "printf test" } }
+            : { rawInput: { command: "printf test", cwd: process.cwd() } }),
         },
       });
       await client.notify(methods.client.session.update, {
@@ -116,7 +164,16 @@ const app = agent({ name: "bex-security-test-agent" })
           sessionUpdate: "tool_call_update",
           toolCallId: "command-1",
           status: "completed",
-          rawOutput: { formatted_output: "test", exit_code: 0 },
+          rawOutput:
+            process.env.BEX_TEST_AGENT === "muse"
+              ? {
+                  command: "printf test",
+                  formatted_output:
+                    'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":1,"filesTotal":2}\n',
+                  exit_code: 0,
+                  truncated: false,
+                }
+              : { formatted_output: "test", exit_code: 0 },
         },
       });
       const responseText = `${resumed ? "resumed" : "new"}:${permission.outcome.outcome === "selected" ? permission.outcome.optionId : "cancelled"}`;

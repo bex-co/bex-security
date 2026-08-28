@@ -192,6 +192,37 @@ describe("CLI", () => {
     expect(config?.codexOverrides).not.toHaveProperty("model_provider");
   });
 
+  test("routes scans through Muse ACP", async () => {
+    let config: CodexSecurityConfig | undefined;
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--agent",
+          "muse",
+          "--model",
+          "muse-spark-1.2",
+          "--effort",
+          "high",
+          "--json",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({ onConfig: (value) => (config = value) }),
+      ),
+    ).toBe(0);
+    expect(config).toMatchObject({
+      agent: "muse",
+      codexOverrides: {
+        model: "muse-spark-1.2",
+        model_reasoning_effort: "high",
+      },
+    });
+    expect(config?.codexOverrides).not.toHaveProperty("model_provider");
+  });
+
   test("passes the safety identifier as a per-scan option", async () => {
     let options: unknown;
     const stderr = capture();
@@ -237,7 +268,7 @@ describe("CLI", () => {
       args: { properties: { repository: { type: "string" } } },
       options: {
         properties: {
-          agent: { enum: ["codex", "claude", "kimi"] },
+          agent: { enum: ["codex", "claude", "kimi", "muse"] },
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
           workers: { type: "integer" },
@@ -2464,6 +2495,7 @@ describe("CLI", () => {
       "codex-security scan . --agent claude --provider zai",
     );
     expect(help.text()).toContain("codex-security scan . --agent kimi");
+    expect(help.text()).toContain("codex-security scan . --agent muse");
     expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).not.toContain("codex-security scan . --path src,tests");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
@@ -2876,6 +2908,10 @@ describe("CLI", () => {
       [
         ["scan", ".", "--agent", "kimi", "--provider", "openrouter"],
         "--agent kimi uses the provider configured by Kimi Code and does not accept --provider",
+      ],
+      [
+        ["scan", ".", "--agent", "muse", "--provider", "openrouter"],
+        "--agent muse uses the provider configured by Muse Code and does not accept --provider",
       ],
       [
         ["scan", ".", "--effort", "ultra"],
@@ -3324,6 +3360,40 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("codex-security: debug: scan.completed");
     expect(stderr.text()).toContain('model="gpt-original"');
     expect(stderr.text()).toContain('reasoning_effort="high"');
+  });
+
+  test("reruns saved Muse scans with the Muse ACP agent", async () => {
+    let rerunConfig: CodexSecurityConfig | undefined;
+
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original", "--json"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onConfig: (value) => (rerunConfig = value),
+          onWorkbench: () => ({
+            recipe: {
+              agent: "muse",
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {
+                model: "muse-spark-1.2",
+                model_reasoning_effort: "high",
+              },
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(rerunConfig).toMatchObject({
+      agent: "muse",
+      codexOverrides: {
+        model: "muse-spark-1.2",
+        model_reasoning_effort: "high",
+      },
+    });
   });
 
   test("reports selected profile settings for verbose scan reruns", async () => {
@@ -5046,6 +5116,31 @@ describe("CLI", () => {
     );
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("FINDINGS  0\n  COVERAGE  complete");
+  });
+
+  test("reports capability-selected host review assignments", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          workerStatuses: [
+            {
+              kind: "preflight",
+              delegation: "unavailable",
+              configuredSlots: 16,
+              fallback: "host",
+            },
+          ],
+        }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toContain(
+      "Preflight: worker delegation unavailable; using 16 host-managed review assignments.",
+    );
   });
 
   test("validates a dry run without starting a scan", async () => {

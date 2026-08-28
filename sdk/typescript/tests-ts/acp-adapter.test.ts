@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,34 @@ function completedMessage(events: ThreadEvent[]): string | undefined {
 }
 
 describe("ACP adapter", () => {
+  test("negotiates namespaced agent capabilities", async () => {
+    const capabilities = await new AcpAgentClient(
+      { env: { ...process.env, BEX_TEST_AGENT: "muse" } },
+      { agent: "muse" },
+      AGENT_PATH,
+    ).capabilities();
+
+    expect(capabilities).toEqual({
+      delegatedWorkers: false,
+      usage: "unavailable",
+      interactivePermissions: false,
+    });
+  });
+
+  test("keeps unadvertised capabilities unknown", async () => {
+    const capabilities = await new AcpAgentClient(
+      {},
+      { agent: "claude" },
+      AGENT_PATH,
+    ).capabilities();
+
+    expect(capabilities).toEqual({
+      delegatedWorkers: null,
+      usage: "unknown",
+      interactivePermissions: null,
+    });
+  });
+
   test("streams ACP messages, permissions, tools, and usage as Codex events", async () => {
     const thread = new AcpCodex({}, AGENT_PATH).startThread({
       workingDirectory: process.cwd(),
@@ -172,6 +200,108 @@ describe("ACP adapter", () => {
       reasoningEffort: "max",
     });
     expect(completedMessage(events)).toBe("new:allow");
+  });
+
+  test("runs Muse through ACP session modes without additional directories", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bex-muse-acp-"));
+    const repository = join(root, "repository");
+    const pluginRoot = join(root, "plugin");
+    const scanOutput = join(root, "scan-output");
+    await Promise.all([mkdir(repository), mkdir(pluginRoot)]);
+    await writeFile(join(repository, ".keep"), "");
+    await writeFile(
+      join(pluginRoot, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "codex-security": {
+            command: process.execPath,
+            args: [],
+            env: {},
+          },
+        },
+      }),
+    );
+    try {
+      const thread = new AcpAgentClient(
+        {
+          env: {
+            ...process.env,
+            BEX_TEST_AGENT: "muse",
+            BEX_TEST_EXPECT_CWD: scanOutput,
+            BEX_TEST_EXPECT_MCP_NAME: "bex",
+            BEX_TEST_EXPECT_MODE: "readOnly",
+            BEX_TEST_EXPECT_PROMPT:
+              "Omit optional string fields when no meaningful value is available",
+            CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+            CODEX_SECURITY_REPOSITORY: repository,
+          },
+        },
+        {
+          agent: "muse",
+          model: "muse-spark-1.2",
+          reasoningEffort: "high",
+        },
+        AGENT_PATH,
+      ).startThread({
+        workingDirectory: scanOutput,
+        additionalDirectories: [tmpdir()],
+        sandboxMode: "read-only",
+      });
+
+      const events = await collect(
+        (await thread.runStreamed("scan with Muse")).events,
+      );
+
+      expect(thread.modelConfiguration).toEqual({
+        model: "muse-spark-1.2",
+        reasoningEffort: "high",
+      });
+      expect(events as unknown[]).toContainEqual({
+        type: "item.completed",
+        item: {
+          id: "command-1",
+          type: "command_execution",
+          command: "printf test",
+          aggregated_output:
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":1,"filesTotal":2}\n',
+          exit_code: 0,
+          output_truncated: false,
+          status: "completed",
+        },
+      });
+      expect(completedMessage(events)).toBe("new:allow");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("bypasses unanswerable Muse approvals while keeping its sandbox", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bex-muse-mode-"));
+    try {
+      const thread = new AcpAgentClient(
+        {
+          env: {
+            ...process.env,
+            BEX_TEST_AGENT: "muse",
+            BEX_TEST_EXPECT_CWD: root,
+            BEX_TEST_EXPECT_MODE: "bypassApprovals",
+          },
+        },
+        { agent: "muse" },
+        AGENT_PATH,
+      ).startThread({
+        workingDirectory: root,
+        sandboxMode: "workspace-write",
+      });
+
+      const events = await collect(
+        (await thread.runStreamed("scan with Muse")).events,
+      );
+
+      expect(events.at(-1)?.type).toBe("turn.completed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("keeps model credentials out of the Claude workbench MCP process", async () => {

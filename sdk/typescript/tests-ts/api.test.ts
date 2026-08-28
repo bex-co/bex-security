@@ -1404,6 +1404,21 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("reports Muse authentication and model defaults", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const client = new TestClient({ agent: "muse" }, { environment: {} });
+
+    expect(await client.preflight(repository)).toMatchObject({
+      agent: "muse",
+      authentication: { method: "agent", agent: "muse", verified: false },
+      model: "default",
+      reasoningEffort: "default",
+    });
+    await client.close();
+  });
+
   test.each(EXTERNAL_PROVIDER_CASES)(
     "requires the %s API key instead of accepting another provider's credentials",
     async (name, provider, apiKey, model, providerConfig) => {

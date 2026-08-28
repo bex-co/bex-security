@@ -110,13 +110,13 @@ responses reject the promise.
 
 Pass runtime configuration to the `CodexSecurity` constructor:
 
-| Option           | Description                                                                     |
-| ---------------- | ------------------------------------------------------------------------------- |
-| `agent`          | Select `"codex"` (default), `"claude"`, or the experimental `"kimi"` ACP agent. |
-| `claudeProvider` | Select `"zai"` or `"kimi"` to route the Claude agent through that provider.     |
-| `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin.     |
-| `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                       |
-| `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.            |
+| Option           | Description                                                                 |
+| ---------------- | --------------------------------------------------------------------------- |
+| `agent`          | Select `"codex"` (default), `"claude"`, `"kimi"`, or `"muse"` ACP agent.    |
+| `claudeProvider` | Select `"zai"` or `"kimi"` to route the Claude agent through that provider. |
+| `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin. |
+| `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                   |
+| `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.        |
 
 Pass scan configuration to `security.run(repository, options)` or
 `security.preflight(repository, options)`:
@@ -199,6 +199,23 @@ npx @openai/codex-security scan . --agent kimi --model kimi-code/k3-256k --effor
 Native Kimi uses its saved provider configuration and reports its negotiated
 model and thinking level over ACP. See the
 [Kimi ACP reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp).
+
+Muse Code can run through the Bex-maintained
+[`@bex-co/muse-code-acp`](https://github.com/bex-co/muse-code-acp) adapter.
+The adapter ships with this package. Install Muse Code, authenticate it, and
+select it for the scan:
+
+```bash
+muse login
+npx @openai/codex-security scan . --agent muse
+npx @openai/codex-security scan . --agent muse --model muse-spark-1.2-contributor --effort high
+```
+
+Muse owns authentication and model selection. Bex passes its stdio security
+workbench through ACP; additional workspace roots and interactive approvals
+are not available through Muse Code 0.2.1. When the adapter reports that
+delegated workers are unavailable, Bex uses capability-selected host review
+assignments and accepts progress only from completed, non-truncated file reads.
 
 For local use, sign in with ChatGPT:
 

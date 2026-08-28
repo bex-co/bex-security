@@ -115,6 +115,34 @@ export function scanActivityFromEvent(
   return null;
 }
 
+/** Exact repository paths observed in a completed read/search operation.
+ * Unlike dashboard activity this is not presentation-capped. */
+export function scanReviewEvidenceFromEvent(
+  event: Readonly<Record<string, unknown>>,
+  repository: string,
+): string[] {
+  if (event["type"] !== "item.completed" || !isRecord(event["item"])) {
+    return [];
+  }
+  const item = event["item"];
+  if (item["status"] === "failed" || item["output_truncated"] === true)
+    return [];
+  if (
+    item["type"] === "command_execution" &&
+    typeof item["command"] === "string" &&
+    /(?:^|[;&|]\s*)(?:[^\s;&|]*[\\/])?(?:cat|sed|nl|rg|grep|head|tail|awk|bat|less|more|wc)(?:\s|$)/u.test(
+      displayCommand(item["command"]),
+    )
+  ) {
+    return commandRepositoryPaths(item["command"], repository, Infinity);
+  }
+  if (item["type"] !== "mcp_tool_call" || typeof item["tool"] !== "string") {
+    return [];
+  }
+  if (!/^(?:read|read_file|Read|grep|search)$/u.test(item["tool"])) return [];
+  return argumentRepositoryPaths(item["arguments"], repository, Infinity);
+}
+
 function displayCommand(command: string): string {
   const normalized = command.replaceAll(/\s+/gu, " ").trim();
   const match =
@@ -353,18 +381,15 @@ function sessionCallArguments(
   }
 }
 
-function commandRepositoryPaths(command: string, repository: string): string[] {
+function commandRepositoryPaths(
+  command: string,
+  repository: string,
+  limit = MAX_ACTIVITY_PATHS,
+): string[] {
   const paths = new Set<string>();
   const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
   for (const token of command.match(SHELL_TOKEN) ?? []) {
-    let value = token;
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    value = value.replaceAll('\\"', '"').replaceAll("\\", "/");
+    const value = shellTokenValue(token, repository.includes("\\"));
     for (const prefix of [
       "$CODEX_SECURITY_REPOSITORY/",
       "${CODEX_SECURITY_REPOSITORY}/",
@@ -375,6 +400,7 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
         .slice(prefix.length)
         .replace(/["'\r\n].*$/u, "")
         .trim()
+        .replace(/\\+$/u, "")
         .replace(/\/+$/u, "")
         .replace(/:\d+(?::\d+)?$/u, "");
       if (
@@ -385,26 +411,44 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
         paths.add(path);
       }
     }
-    if (paths.size >= MAX_ACTIVITY_PATHS) break;
+    if (paths.size >= limit) break;
   }
   return [...paths];
 }
 
-function argumentRepositoryPaths(value: unknown, repository: string): string[] {
+function argumentRepositoryPaths(
+  value: unknown,
+  repository: string,
+  limit = MAX_ACTIVITY_PATHS,
+): string[] {
   if (!isRecord(value)) return [];
   const candidates = [value["path"], value["file_path"], value["paths"]].flat();
   const paths = new Set<string>();
   const prefix = `${repository.replaceAll("\\", "/").replace(/\/$/u, "")}/`;
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
-    const normalized = candidate.replaceAll("\\", "/");
+    const normalized = repository.includes("\\")
+      ? candidate.replaceAll("\\", "/")
+      : candidate;
     if (normalized.startsWith(prefix)) {
       const path = normalized.slice(prefix.length);
       if (!path.split("/").includes("..")) paths.add(path);
     }
-    if (paths.size >= MAX_ACTIVITY_PATHS) break;
+    if (paths.size >= limit) break;
   }
   return [...paths];
+}
+
+function shellTokenValue(token: string, windowsPath: boolean): string {
+  const doubleQuoted = token.startsWith('"') && token.endsWith('"');
+  const singleQuoted = token.startsWith("'") && token.endsWith("'");
+  let value = doubleQuoted || singleQuoted ? token.slice(1, -1) : token;
+  if (doubleQuoted) {
+    value = value.replaceAll(/\\(["$`\\])/gu, "$1");
+  } else if (!singleQuoted) {
+    value = value.replaceAll(/\\(.)/gu, "$1");
+  }
+  return windowsPath ? value.replaceAll("\\", "/") : value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

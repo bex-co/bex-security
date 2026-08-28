@@ -3,7 +3,7 @@
 **Open security workflows for every coding agent and model.**
 
 [![Upstream: openai/codex-security](https://img.shields.io/badge/upstream-openai%2Fcodex--security-111827)](https://github.com/openai/codex-security)
-[![ACP alpha](https://img.shields.io/badge/ACP-Codex%20%2B%20Claude%20%2B%20Kimi%20alpha-7c3aed)](https://github.com/agentclientprotocol)
+[![ACP alpha](https://img.shields.io/badge/ACP-Codex%20%2B%20Claude%20%2B%20Kimi%20%2B%20Muse%20alpha-7c3aed)](https://github.com/agentclientprotocol)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Bex Security is an upstream-first fork of
@@ -60,6 +60,7 @@ upstream package name and CLI behavior so existing workflows keep working. Its
 first ACP vertical slice runs Codex sessions through `codex-acp`, and its first
 pluggable agent integrations run Claude Code through `claude-agent-acp` and
 Kimi Code through its native `kimi acp` server.
+Muse Code runs through Bex's community `muse-code-acp` adapter.
 
 | Capability                                       | Status                            |
 | ------------------------------------------------ | --------------------------------- |
@@ -69,6 +70,7 @@ Kimi Code through its native `kimi acp` server.
 | Codex sessions over ACP v1 and `codex-acp`       | Alpha                             |
 | Claude Code sessions over `claude-agent-acp`     | Alpha                             |
 | Kimi Code sessions over native `kimi acp`        | Alpha                             |
+| Muse Code sessions over `muse-code-acp`          | Alpha                             |
 | Kimi models through Claude Code                  | Alpha                             |
 | Additional ACP agents                            | Contributors welcome              |
 | Bex-branded CLI (`bex-security`)                 | Available                         |
@@ -104,6 +106,7 @@ flowchart TB
         codex["Codex app-server + security plugin (current subprocess)"]
         claudeAcp["claude-agent-acp + Claude Code (current subprocess)"]
         kimiAcp["Kimi Code native ACP (current subprocess)"]
+        museAcp["muse-code-acp + Muse Code (current subprocess)"]
         acp["additional compatible ACP agent (future subprocess)"]
     end
 
@@ -119,6 +122,7 @@ flowchart TB
     acpAdapter <-->|bidirectional ACP v1 over stdio| codexAcp
     acpAdapter <-->|same ACP v1 transport| claudeAcp
     acpAdapter <-->|same ACP v1 transport| kimiAcp
+    acpAdapter <-->|same ACP v1 transport| museAcp
     codexAcp <-->|Codex app-server JSON-RPC| codex
     acpAdapter -.->|future capability-tested driver| acp
     acpAdapter --> gateway
@@ -127,13 +131,14 @@ flowchart TB
     gateway -->|stdio MCP tools| workbench
     claudeAcp -->|Claude-owned model configuration| model
     kimiAcp -->|Kimi-owned model configuration| model
+    museAcp -->|Muse-owned model configuration| model
     codex -->|provider-specific API| model
     acp -->|agent-owned model configuration| model
 ```
 
 The adapter makes Bex the ACP client and selects a small agent driver for
-`codex-acp`, `claude-agent-acp`, or native `kimi acp`. Bex launches the selected
-agent per turn, negotiates ACP v1, creates or resumes its session, streams
+`codex-acp`, `claude-agent-acp`, native `kimi acp`, or `muse-code-acp`. Bex
+launches the selected agent per turn, negotiates ACP v1, creates or resumes its session, streams
 protocol updates into the existing scan observers, forwards cancellation, and
 preserves the current noninteractive permission boundary. The agent still owns
 model authentication and access; Bex continues to own scan scope, the workflow,
@@ -250,6 +255,30 @@ model and thinking level negotiated by Kimi. See the
 [Kimi ACP reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp),
 and [Kimi Claude Code guide](https://www.kimi.com/code/docs/en/third-party-tools/claude-code.html).
 
+Muse Code is available through the Bex-maintained
+[`@bex-co/muse-code-acp`](https://github.com/bex-co/muse-code-acp) adapter.
+The adapter ships with Bex Security; install Muse Code and authenticate it once:
+
+```bash
+muse login
+```
+
+Then select Muse for a scan:
+
+```bash
+./bex-security scan . --agent muse
+./bex-security scan . --agent muse --model muse-spark-1.2-contributor --effort high
+```
+
+Bex forwards its stdio security workbench through ACP. Muse owns model
+authentication and configuration. Muse does not expose additional ACP
+workspace roots or interactive tool approvals, and usage or cost may be
+unavailable when a scan completes. Because Muse does not expose delegated
+workers through ACP, Bex automatically runs bounded host-managed review
+assignments and advances file coverage only for completed, non-truncated read
+operations. The existing scan command needs no Muse-specific orchestration
+flag.
+
 Codex remains the default agent. Sign in with ChatGPT or provide an API key:
 
 ```bash
@@ -268,6 +297,7 @@ Common scan commands:
 ./bex-security scan . --agent claude --provider zai --model glm-5.3
 ./bex-security scan . --agent claude --provider kimi
 ./bex-security scan . --agent kimi
+./bex-security scan . --agent muse
 ./bex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 ./bex-security scan . --validation-prompt-file validation.md
 ./bex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
@@ -276,7 +306,8 @@ Common scan commands:
 For CI with Codex, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing
 in. `--agent claude` delegates authentication and model discovery to the local
 Claude Code installation unless a provider is selected. `--agent kimi`
-delegates both to the local Kimi Code installation. The default remains
+delegates both to the local Kimi Code installation, and `--agent muse`
+delegates both to Muse Code through `muse-code-acp`. The default remains
 `--agent codex`; saved scan
 recipes created before agent selection also replay with Codex.
 

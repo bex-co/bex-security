@@ -4,4 +4,4 @@
 
 ## Milestones
 
-_(none yet — add via `/pm promote w1/NNN` or `/pm new milestone w1 <title>`)_
+- [x] **m1** — Make Muse ACP a trustworthy Bex Security agent (11 tasks) ← from maintainer reliability diagnosis

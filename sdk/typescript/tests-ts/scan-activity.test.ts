@@ -3,6 +3,7 @@ import {
   scanActivitiesFromEvent,
   scanActivityFromEvent,
   scanActivityFromSessionEvent,
+  scanReviewEvidenceFromEvent,
 } from "../src/scan-activity.js";
 
 function commandEvent(
@@ -47,6 +48,60 @@ function sessionEvent(
 }
 
 describe("scan activity", () => {
+  test("collects uncapped evidence only from completed read operations", () => {
+    const paths = Array.from(
+      { length: 12 },
+      (_, index) => `src/file-${index}.ts`,
+    );
+    const command = `cat ${paths
+      .map((path) => `"$CODEX_SECURITY_REPOSITORY/${path}"`)
+      .join(" ")}`;
+    expect(
+      scanReviewEvidenceFromEvent(
+        {
+          type: "item.completed",
+          item: {
+            id: "read-all",
+            type: "command_execution",
+            command,
+            aggregated_output: "",
+            status: "completed",
+          },
+        },
+        "/code/repository",
+      ),
+    ).toEqual(paths);
+    expect(
+      scanReviewEvidenceFromEvent(
+        {
+          type: "item.completed",
+          item: {
+            id: "write-one",
+            type: "command_execution",
+            command: 'printf x > "$CODEX_SECURITY_REPOSITORY/src/file-0.ts"',
+            status: "completed",
+          },
+        },
+        "/code/repository",
+      ),
+    ).toEqual([]);
+    expect(
+      scanReviewEvidenceFromEvent(
+        {
+          type: "item.completed",
+          item: {
+            id: "truncated-read",
+            type: "command_execution",
+            command,
+            output_truncated: true,
+            status: "completed",
+          },
+        },
+        "/code/repository",
+      ),
+    ).toEqual([]);
+  });
+
   test("reports repository files as soon as a read command starts", () => {
     expect(
       scanActivityFromEvent(
@@ -202,6 +257,16 @@ describe("scan activity", () => {
         "/code/juice shop",
       ),
     ).toMatchObject({ paths: ["routes/login page.ts"] });
+  });
+
+  test("decodes shell-escaped dollar signs in quoted Unix paths", () => {
+    const command = 'cat "/code/juice-shop/routes/u.\\$.tsx"';
+    expect(
+      scanReviewEvidenceFromEvent(
+        commandEvent("item.completed", command),
+        "/code/juice-shop",
+      ),
+    ).toEqual(["routes/u.$.tsx"]);
   });
 
   test("cleans escaped quotes from real wrapped scan commands", () => {

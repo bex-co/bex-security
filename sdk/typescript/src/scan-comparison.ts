@@ -195,12 +195,12 @@ export async function runReadOnlyCodex(
           )
       : undefined;
   const command =
-    environment === undefined || agent === "claude"
+    environment === undefined || agent !== "codex"
       ? undefined
       : resolveCodexCommand(environment);
   const codex =
     options.codex ??
-    (agent === "claude"
+    (agent !== "codex"
       ? new AcpAgentClient(
           { env: environment },
           {

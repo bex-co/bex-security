@@ -10,7 +10,7 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
-export const ACP_AGENT_NAMES = ["codex", "claude", "kimi"] as const;
+export const ACP_AGENT_NAMES = ["codex", "claude", "kimi", "muse"] as const;
 export type AcpAgentName = (typeof ACP_AGENT_NAMES)[number];
 
 export const ZAI_CLAUDE_PROVIDER = {

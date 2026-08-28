@@ -15,6 +15,7 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
+import { pathIsWithin } from "./path-scope.js";
 import {
   requirePrivateOutputDirectory,
   requireSecureOutputAncestry,
@@ -182,7 +183,7 @@ export async function loadContractWithScanDirectory(
     );
   }
 
-  validateCanonicalContract(manifest, findings);
+  validateCanonicalContract(manifest, findings, coverage);
 
   await validateSeal(
     scanDir,
@@ -422,6 +423,7 @@ function removeUnsupportedLegacyNullableStrings(
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
+  coverage: CoverageDocument,
 ): void {
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
@@ -489,6 +491,20 @@ function validateCanonicalContract(
           { cause: error },
         );
       }
+      if (coverageExcludesPath(coverage, location.path)) {
+        throw new ContractValidationError(
+          `${locationContext}.path: finding locations cannot reference an excluded path.`,
+        );
+      }
+    }
+    for (const [evidenceIndex, evidence] of (
+      finding.codeEvidence ?? []
+    ).entries()) {
+      if (coverageExcludesPath(coverage, evidence.path)) {
+        throw new ContractValidationError(
+          `${context}.codeEvidence[${evidenceIndex}].path: finding evidence cannot reference an excluded path.`,
+        );
+      }
     }
 
     const fingerprint = `codex-security/v1:sha256:${sha256Text(
@@ -520,6 +536,39 @@ function validateCanonicalContract(
       );
     }
   }
+}
+
+function coverageExcludesPath(
+  coverage: CoverageDocument,
+  path: string,
+): boolean {
+  return [
+    ...coverage.excludePaths,
+    ...coverage.explicitExclusions.map(({ pattern }) => pattern),
+  ].some(
+    (pattern) => pathIsWithin(path, pattern) || globMatches(path, pattern),
+  );
+}
+
+function globMatches(path: string, pattern: string): boolean {
+  if (!/[?*]/u.test(pattern)) return false;
+  let source = "^";
+  for (let index = 0; index < pattern.length; index++) {
+    const character = pattern[index]!;
+    if (character === "*") {
+      if (pattern[index + 1] === "*") {
+        source += ".*";
+        index++;
+      } else {
+        source += "[^/]*";
+      }
+    } else if (character === "?") {
+      source += "[^/]";
+    } else {
+      source += character.replace(/[\\^$+.()|{}[\]]/gu, "\\$&");
+    }
+  }
+  return new RegExp(`${source}$`, "u").test(path);
 }
 
 function sha256Text(value: string): string {

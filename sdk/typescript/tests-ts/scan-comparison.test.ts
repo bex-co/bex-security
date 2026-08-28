@@ -160,53 +160,56 @@ describe("semantic scan comparison", () => {
     }
   });
 
-  test("uses the selected Claude agent for read-only comparison turns", async () => {
-    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
-    let selection: AcpAgentSelection | undefined;
-    const startThread = spyOn(
-      AcpAgentClient.prototype,
-      "startThread",
-    ).mockImplementation(function (this: AcpAgentClient, options) {
-      selection = (this as unknown as { selection: AcpAgentSelection })
-        .selection;
-      return codex.startThread(options!) as unknown as ReturnType<
-        AcpAgentClient["startThread"]
-      >;
-    });
-    try {
-      await matchScanFindings(
-        { before: [], after: [] },
-        {
-          config: {
-            agent: "claude",
-            codexOverrides: {
-              model: "sonnet",
-              model_reasoning_effort: "high",
+  test.each(["claude", "kimi", "muse"] as const)(
+    "uses the selected %s agent for read-only comparison turns",
+    async (agent) => {
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      let selection: AcpAgentSelection | undefined;
+      const startThread = spyOn(
+        AcpAgentClient.prototype,
+        "startThread",
+      ).mockImplementation(function (this: AcpAgentClient, options) {
+        selection = (this as unknown as { selection: AcpAgentSelection })
+          .selection;
+        return codex.startThread(options!) as unknown as ReturnType<
+          AcpAgentClient["startThread"]
+        >;
+      });
+      try {
+        await matchScanFindings(
+          { before: [], after: [] },
+          {
+            config: {
+              agent,
+              codexOverrides: {
+                model: "sonnet",
+                model_reasoning_effort: "high",
+              },
+            },
+            environment: {
+              ANTHROPIC_API_KEY: "synthetic-anthropic-key",
+              OPENROUTER_API_KEY: "synthetic-unrelated-key",
             },
           },
-          environment: {
-            ANTHROPIC_API_KEY: "synthetic-anthropic-key",
-            OPENROUTER_API_KEY: "synthetic-unrelated-key",
-          },
-        },
-      );
+        );
 
-      expect(selection).toEqual({
-        agent: "claude",
-        model: "sonnet",
-        reasoningEffort: "high",
-      });
-      expect(calls.threadOptions).toMatchObject({
-        sandboxMode: "read-only",
-        approvalPolicy: "never",
-        networkAccessEnabled: false,
-      });
-      expect(calls.threadOptions).not.toHaveProperty("model");
-      expect(calls.threadOptions).not.toHaveProperty("modelReasoningEffort");
-    } finally {
-      startThread.mockRestore();
-    }
-  });
+        expect(selection).toEqual({
+          agent,
+          model: "sonnet",
+          reasoningEffort: "high",
+        });
+        expect(calls.threadOptions).toMatchObject({
+          sandboxMode: "read-only",
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        expect(calls.threadOptions).not.toHaveProperty("model");
+        expect(calls.threadOptions).not.toHaveProperty("modelReasoningEffort");
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
 
   test("preserves environment API-key precedence over managed credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));

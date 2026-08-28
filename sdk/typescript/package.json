@@ -56,9 +56,10 @@
     "types": "pnpm run generate:models:check && tsc --noEmit"
   },
   "dependencies": {
-    "@agentclientprotocol/codex-acp": "1.6.2",
     "@agentclientprotocol/claude-agent-acp": "0.70.0",
+    "@agentclientprotocol/codex-acp": "1.6.2",
     "@agentclientprotocol/sdk": "1.4.0",
+    "@bex-co/muse-code-acp": "0.1.1",
     "@inquirer/prompts": "8.3.0",
     "@linear/sdk": "89.0.0",
     "@octokit/core": "7.0.6",

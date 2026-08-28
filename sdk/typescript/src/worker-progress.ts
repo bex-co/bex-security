@@ -46,6 +46,7 @@ export type ScanWorkerStatus =
       kind: "preflight";
       delegation: "available" | "unavailable" | "unknown";
       configuredSlots: number | null;
+      fallback?: "host";
     }
   | {
       kind: "dispatch";

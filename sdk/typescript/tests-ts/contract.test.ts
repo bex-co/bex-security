@@ -748,6 +748,27 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
+  test("rejects findings that reference explicitly excluded paths", async () => {
+    for (const pattern of ["src", "src/**"]) {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const coveragePath = join(scanDir, "coverage.json");
+      const findings = await readJson(findingsPath);
+      const coverage = await readJson(coveragePath);
+      findings["findings"][0]["locations"][0]["path"] = "src/app.ts";
+      coverage["explicitExclusions"] = [
+        { pattern, reason: "Generated source is outside this scan." },
+      ];
+      await writeJson(findingsPath, findings);
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow("finding locations cannot reference an excluded path");
+    }
+  });
+
   test("rejects trailing-dot aliases for sealed artifacts", async () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
