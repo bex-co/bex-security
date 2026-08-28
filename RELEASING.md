@@ -1,13 +1,31 @@
-# Releasing Codex Security
+# Releasing Bex Security
+
+Bex releases are published as `@bex-co/bex-security` with versions in the
+form `<upstream-version>-bex.<release-number>`. The npm package, annotated
+`bex-v<version>` Git tag, and GitHub release must identify the same immutable
+version. Package metadata records the upstream package version and exact
+upstream commit used by the fork.
+
+Invoke `/release` to bump, validate, publish, and verify a release. The
+repository release skill is the source of truth for preconditions, version
+selection, public metadata review, CI, npm authentication, recovery, and final
+verification. The reviewed release body lives in
+`.github/bex-release-notes.md`.
+
+Do not reuse a published version. If npm succeeds before a later step fails,
+invoke `/release` again in recovery mode to finish the existing tag or GitHub
+release without publishing another archive.
+
+## Preserved upstream automation
 
 [GitHub Releases](https://github.com/openai/codex-security/releases) is the
-canonical changelog. Under the current process, each new release combines a
+canonical upstream changelog. Under the upstream process, each new release combines a
 short, reviewed summary with a categorized list of merged pull requests.
 Historical releases may contain generated notes only. The release tag and npm
 package use the same stable version: `npm-vX.Y.Z` and
 `@openai/codex-security@X.Y.Z`.
 
-## Pull request titles and categories
+### Pull request titles and categories
 
 Pull request titles must follow this form:
 
@@ -41,7 +59,7 @@ Use `release` and `test` only for changes that do not affect package users. A
 maintainer can apply `skip-release-notes` to exclude another internal change.
 That manual label takes precedence over the title category.
 
-## Prepare a release
+### Prepare an upstream release
 
 1. Choose the next stable version and update `sdk/typescript/package.json`.
    Keep the lockfile version in sync when it records the package version.
@@ -60,7 +78,7 @@ Review the summary with the same standard as product documentation. Keep it
 specific, describe behavior before implementation, and do not include private
 repositories, systems, people, findings, links, or issue identifiers.
 
-## Publish
+### Publish an upstream release
 
 The release starts after the version bump reaches `main` and `node-ci` succeeds
 for that exact commit:
@@ -76,7 +94,7 @@ for that exact commit:
 Monitor all three workflows. A version bump is not a completed release until
 the npm package and GitHub release both exist and match the tag.
 
-## Verify
+### Verify an upstream release
 
 Check the published state before announcing the release:
 
@@ -92,7 +110,7 @@ Check the published state before announcing the release:
 - Every merged pull request is included or has an intentional
   `skip-release-notes` label.
 
-## Recover or repair a release
+### Recover or repair an upstream release
 
 Do not retarget a release tag or publish a second package under the same
 version. The workflows are designed to recover from partial publication while

@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 
 const packageName = "@openai/codex-security";
+const bexPackageName = "@bex-co/bex-security";
 const stableVersion = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const provenancePredicate = "https://slsa.dev/provenance/v1";
 const publicNpmRegistry = "https://registry.npmjs.org/";
@@ -26,6 +27,17 @@ function stableReleaseTagVersion(tag) {
 }
 
 export function releaseVersion(packageJson) {
+  if (packageJson?.name === bexPackageName) {
+    if (packageJson.bex?.upstreamPackage !== packageName) {
+      throw new Error(
+        "Bex release metadata must identify @openai/codex-security as upstream.",
+      );
+    }
+    packageJson = {
+      name: packageJson.bex.upstreamPackage,
+      version: packageJson.bex.upstreamVersion,
+    };
+  }
   if (packageJson?.name !== packageName) {
     throw new Error("Release package must be @openai/codex-security.");
   }

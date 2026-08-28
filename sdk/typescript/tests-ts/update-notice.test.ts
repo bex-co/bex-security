@@ -24,12 +24,12 @@ describe("CLI update notice", () => {
     });
 
     expect(requestedUrl).toBe(
-      "https://registry.npmjs.org/%40openai%2Fcodex-security/latest",
+      "https://registry.npmjs.org/%40bex-co%2Fbex-security/latest",
     );
     expect(notice).toEqual({
       currentVersion: "0.1.0",
       latestVersion: "0.2.0",
-      command: "npx @openai/codex-security@latest",
+      command: "npx @bex-co/bex-security@latest",
     });
   });
 
@@ -45,7 +45,7 @@ describe("CLI update notice", () => {
     });
 
     expect(requestedUrl).toBe(
-      "https://registry.example.test/npm/%40openai%2Fcodex-security/latest",
+      "https://registry.example.test/npm/%40bex-co%2Fbex-security/latest",
     );
   });
 
@@ -74,7 +74,7 @@ describe("CLI update notice", () => {
 
   test("recognizes npx and local or global npm, pnpm, Yarn, and Bun", () => {
     const installed = "/workspace/node_modules/pkg/dist/version.js";
-    const packageName = "@openai/codex-security@latest";
+    const packageName = "@bex-co/bex-security@latest";
 
     for (const [environment, entrypoint, command] of [
       [{ npm_command: "exec" }, installed, `npx ${packageName}`],
@@ -177,6 +177,22 @@ describe("CLI update notice", () => {
     }
   });
 
+  test("notifies across Bex releases and upstream baselines", async () => {
+    for (const [currentVersion, latestVersion] of [
+      ["0.1.20-bex.1", "0.1.20-bex.2"],
+      ["0.1.20-bex.9", "0.1.20-bex.10"],
+      ["0.1.20-bex.2", "0.1.21-bex.1"],
+    ] as const) {
+      await expect(
+        checkForUpdate({
+          environment: {},
+          currentVersion,
+          fetch: registryResponse(latestVersion),
+        }),
+      ).resolves.toMatchObject({ currentVersion, latestVersion });
+    }
+  });
+
   test("suppresses registry checks in CI or when disabled", async () => {
     let requests = 0;
     const fetchLatest = async () => {
@@ -225,7 +241,7 @@ describe("CLI update notice", () => {
     const notice = {
       currentVersion: "0.1.0",
       latestVersion: "0.2.0",
-      command: "npm install -g @openai/codex-security@latest",
+      command: "npm install -g @bex-co/bex-security@latest",
     };
 
     expect(

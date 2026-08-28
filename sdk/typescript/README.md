@@ -1,19 +1,21 @@
-# `@openai/codex-security`
+# `@bex-co/bex-security`
 
-Open-source TypeScript SDK and CLI for running Codex Security scans. The
-ESM-only package includes TypeScript declarations, the `bex-security` and
+Open-source TypeScript SDK and CLI for running evidence-backed Bex Security
+scans with Codex, Claude Code, Kimi Code, Muse Code, and additional ACP agents.
+The ESM-only package includes TypeScript declarations, the `bex-security` and
 `codex-security` executables, and the matching Codex runtime. Both executable
 names run the same CLI; `codex-security` remains available for compatibility.
 
 > [!NOTE]
-> This package follows semantic versioning. Its public API may change between
-> minor versions before `1.0.0`.
+> Versions use `upstreamVersion-bex.N`, so the upstream Codex Security baseline
+> and each Bex release on that baseline remain visible. The public API may
+> change between minor versions before `1.0.0`.
 
 ## Install
 
 ```bash
-npm install @openai/codex-security
-npx @openai/codex-security --version
+npm install @bex-co/bex-security
+npx @bex-co/bex-security --version
 ```
 
 The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
@@ -29,12 +31,12 @@ notice. Notices are also disabled in CI and when stderr is not a terminal.
 
 ## Run a scan from TypeScript
 
-Sign in with `npx @openai/codex-security login` or set `OPENAI_API_KEY` or
+Sign in with `npx @bex-co/bex-security login` or set `OPENAI_API_KEY` or
 `CODEX_API_KEY`. Then create a client and scan a repository you own or have
 permission to assess:
 
 ```ts
-import { CodexSecurity } from "@openai/codex-security";
+import { CodexSecurity } from "@bex-co/bex-security";
 
 const security = new CodexSecurity();
 
@@ -151,7 +153,7 @@ Codex remains the default agent and uses the authentication methods below. To
 run the same Bex scan workflow through Claude Code instead, use:
 
 ```bash
-npx @openai/codex-security scan . --agent claude
+npx @bex-co/bex-security scan . --agent claude
 ```
 
 Claude Code owns authentication and advertises its available models and
@@ -165,7 +167,7 @@ To run the Claude ACP agent with GLM through Z.AI:
 
 ```bash
 export ZAI_API_KEY="<your-zai-api-key>"
-npx @openai/codex-security scan . --agent claude --provider zai
+npx @bex-co/bex-security scan . --agent claude --provider zai
 ```
 
 The Z.AI path defaults to `glm-5.3[1m]`; use `--model glm-5.3` (or another GLM
@@ -180,7 +182,7 @@ available to the account:
 
 ```bash
 export KIMI_API_KEY="<your-kimi-api-key>"
-npx @openai/codex-security scan . --agent claude --provider kimi
+npx @bex-co/bex-security scan . --agent claude --provider kimi
 ```
 
 The provider credential and Anthropic-compatible settings are scoped to the
@@ -192,8 +194,8 @@ Kimi Code can also run as the ACP agent itself. Install it, put `kimi` on
 
 ```bash
 kimi login
-npx @openai/codex-security scan . --agent kimi
-npx @openai/codex-security scan . --agent kimi --model kimi-code/k3-256k --effort high
+npx @bex-co/bex-security scan . --agent kimi
+npx @bex-co/bex-security scan . --agent kimi --model kimi-code/k3-256k --effort high
 ```
 
 Native Kimi uses its saved provider configuration and reports its negotiated
@@ -207,8 +209,8 @@ select it for the scan:
 
 ```bash
 muse login
-npx @openai/codex-security scan . --agent muse
-npx @openai/codex-security scan . --agent muse --model muse-spark-1.2-contributor --effort high
+npx @bex-co/bex-security scan . --agent muse
+npx @bex-co/bex-security scan . --agent muse --model muse-spark-1.2-contributor --effort high
 ```
 
 Muse owns authentication and model selection. Bex passes its stdio security
@@ -220,21 +222,21 @@ assignments and accepts progress only from completed, non-truncated file reads.
 For local use, sign in with ChatGPT:
 
 ```bash
-npx @openai/codex-security login
-npx @openai/codex-security scan .
+npx @bex-co/bex-security login
+npx @bex-co/bex-security scan .
 ```
 
 On a remote or headless machine, use device authentication:
 
 ```bash
-npx @openai/codex-security login --device-auth
+npx @bex-co/bex-security login --device-auth
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To store an API key instead,
 pass it on stdin:
 
 ```bash
-printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
+printenv OPENAI_API_KEY | npx @bex-co/bex-security login --with-api-key
 ```
 
 Environment API keys are supplied directly to the current scan and are never
@@ -249,25 +251,25 @@ To use another inference provider, set its API key and select its provider:
 
 ```bash
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
-npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
+npx @bex-co/bex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
-npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+npx @bex-co/bex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
 
 export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
 export AWS_REGION="us-east-2"
-npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+npx @bex-co/bex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
 On Windows, set the API key in PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY = "<your-api-key>"
-npx @openai/codex-security scan C:\code\repository
+npx @bex-co/bex-security scan C:\code\repository
 ```
 
-Check or remove the stored sign-in with `npx @openai/codex-security login status`
-and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
+Check or remove the stored sign-in with `npx @bex-co/bex-security login status`
+and `npx @bex-co/bex-security logout`. Codex Security keeps its sign-in in a
 private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
 `$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
 configured. On managed Windows devices, inherited access for `SYSTEM` and local
@@ -288,8 +290,8 @@ other noninteractive scans never prompt and retain automatic API-key
 precedence. Select the credential source explicitly with `--auth`:
 
 ```bash
-npx @openai/codex-security scan . --auth chatgpt
-npx @openai/codex-security scan . --auth api-key
+npx @bex-co/bex-security scan . --auth chatgpt
+npx @bex-co/bex-security scan . --auth api-key
 ```
 
 `--auth chatgpt` uses the stored sign-in and ignores `OPENAI_API_KEY` and
@@ -319,73 +321,73 @@ Trusted Access for Cyber. To apply or check your access, visit
 ## CLI
 
 ```bash
-npx @openai/codex-security scan
-npx @openai/codex-security scan /path/to/repository
-npx @openai/codex-security scan /path/to/repository --headless
-npx @openai/codex-security scan /path/to/repository --patch
-npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --json
-npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --create-pr
-npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
-npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
-npx @openai/codex-security scan /path/to/repository --path src --path tests
-npx @openai/codex-security scan-components /path/to/repository --component apps/api --component apps/web --output-dir /path/outside/repository/results
-npx @openai/codex-security scan-components /path/to/repository --auto --output-dir /path/outside/repository/results
-npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
-npx @openai/codex-security scan /path/to/repository --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
-npx @openai/codex-security scan /path/to/repository --diff origin/main --json
-npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results
-npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
-npx @openai/codex-security scan /path/to/repository --verbose
-npx @openai/codex-security scan /path/to/repository --dry-run
-npx @openai/codex-security scan /path/to/repository --fail-on-severity high
-npx @openai/codex-security scan /path/to/repository --max-cost 5
-npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
-npx @openai/codex-security install-hook
-npx @openai/codex-security bulk-scan
-npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
-npx @openai/codex-security bulk-scan --workers 4 --mode deep --max-attempts 3 --max-cost 25
-npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
-npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
-npx @openai/codex-security scans list /path/to/repository
-npx @openai/codex-security scans list --scan-root /path/outside/repository/results
-npx @openai/codex-security scans show
-npx @openai/codex-security scans show SCAN_ID
-npx @openai/codex-security scans logs
-npx @openai/codex-security scans logs SCAN_ID
-npx @openai/codex-security scans rerun
-npx @openai/codex-security scans rerun SCAN_ID
-npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx @openai/codex-security scans match --all
-npx @openai/codex-security scans compare
-npx @openai/codex-security scans compare PREVIOUS_SCAN_ID
-npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx @openai/codex-security findings
-npx @openai/codex-security findings list /path/to/repository
-npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
-npx @openai/codex-security export
-npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
-npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
-npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
-npx @openai/codex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID
-npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
-npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
-npx @openai/codex-security validate "Possible SQL injection" --effort high
-npx @openai/codex-security verify-fix --linear-issue SEC-123 --json
-npx @openai/codex-security verify-fix --linear-project "Security backlog" --linear-filter '{"state":{"type":{"eq":"completed"}}}' --json
-npx @openai/codex-security verify-fix --scan SCAN_ID --severity high --json
-npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
-npx @openai/codex-security patch "Missing authorization check" --effort high
-npx @openai/codex-security patch OCCURRENCE_ID
-npx @openai/codex-security patch --scan SCAN_ID --severity high --json
-npx @openai/codex-security patch --scan SCAN_ID --severity high --create-pr
-npx @openai/codex-security patch --resume-pr codex-security/patch-SCAN_ID
-npx @openai/codex-security patch --scan latest --severity medium
-npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
-npx @openai/codex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
+npx @bex-co/bex-security scan
+npx @bex-co/bex-security scan /path/to/repository
+npx @bex-co/bex-security scan /path/to/repository --headless
+npx @bex-co/bex-security scan /path/to/repository --patch
+npx @bex-co/bex-security scan /path/to/repository --patch --patch-severity high --json
+npx @bex-co/bex-security scan /path/to/repository --patch --patch-severity high --create-pr
+npx @bex-co/bex-security scan /path/to/repository --model gpt-5.6-terra
+npx @bex-co/bex-security scan /path/to/repository --model gpt-5.6-terra --effort high
+npx @bex-co/bex-security scan /path/to/repository --path src --path tests
+npx @bex-co/bex-security scan-components /path/to/repository --component apps/api --component apps/web --output-dir /path/outside/repository/results
+npx @bex-co/bex-security scan-components /path/to/repository --auto --output-dir /path/outside/repository/results
+npx @bex-co/bex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx @bex-co/bex-security scan /path/to/repository --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
+npx @bex-co/bex-security scan /path/to/repository --diff origin/main --json
+npx @bex-co/bex-security scan /path/to/repository --output-dir /path/outside/repository/results
+npx @bex-co/bex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
+npx @bex-co/bex-security scan /path/to/repository --verbose
+npx @bex-co/bex-security scan /path/to/repository --dry-run
+npx @bex-co/bex-security scan /path/to/repository --fail-on-severity high
+npx @bex-co/bex-security scan /path/to/repository --max-cost 5
+npx @bex-co/bex-security scan /path/to/repository --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
+npx @bex-co/bex-security install-hook
+npx @bex-co/bex-security bulk-scan
+npx @bex-co/bex-security bulk-scan --model gpt-5.6-terra --effort high
+npx @bex-co/bex-security bulk-scan --workers 4 --mode deep --max-attempts 3 --max-cost 25
+npx @bex-co/bex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx @bex-co/bex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
+npx @bex-co/bex-security scans list /path/to/repository
+npx @bex-co/bex-security scans list --scan-root /path/outside/repository/results
+npx @bex-co/bex-security scans show
+npx @bex-co/bex-security scans show SCAN_ID
+npx @bex-co/bex-security scans logs
+npx @bex-co/bex-security scans logs SCAN_ID
+npx @bex-co/bex-security scans rerun
+npx @bex-co/bex-security scans rerun SCAN_ID
+npx @bex-co/bex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @bex-co/bex-security scans match --all
+npx @bex-co/bex-security scans compare
+npx @bex-co/bex-security scans compare PREVIOUS_SCAN_ID
+npx @bex-co/bex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @bex-co/bex-security findings
+npx @bex-co/bex-security findings list /path/to/repository
+npx @bex-co/bex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
+npx @bex-co/bex-security export
+npx @bex-co/bex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
+npx @bex-co/bex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
+npx @bex-co/bex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
+npx @bex-co/bex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID
+npx @bex-co/bex-security publish scan --to linear --linear-team TEAM_ID
+npx @bex-co/bex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
+npx @bex-co/bex-security validate "Possible SQL injection" --effort high
+npx @bex-co/bex-security verify-fix --linear-issue SEC-123 --json
+npx @bex-co/bex-security verify-fix --linear-project "Security backlog" --linear-filter '{"state":{"type":{"eq":"completed"}}}' --json
+npx @bex-co/bex-security verify-fix --scan SCAN_ID --severity high --json
+npx @bex-co/bex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
+npx @bex-co/bex-security patch "Missing authorization check" --effort high
+npx @bex-co/bex-security patch OCCURRENCE_ID
+npx @bex-co/bex-security patch --scan SCAN_ID --severity high --json
+npx @bex-co/bex-security patch --scan SCAN_ID --severity high --create-pr
+npx @bex-co/bex-security patch --resume-pr codex-security/patch-SCAN_ID
+npx @bex-co/bex-security patch --scan latest --severity medium
+npx @bex-co/bex-security patch --linear-issue SEC-123 --linear-issue SEC-124
+npx @bex-co/bex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
 ```
 
-Run `npx @openai/codex-security --version` for the installed CLI version or
-`npx @openai/codex-security info --json` for the package, bundled plugin, Codex runtime,
+Run `npx @bex-co/bex-security --version` for the installed CLI version or
+`npx @bex-co/bex-security info --json` for the package, bundled plugin, Codex runtime,
 default model, reasoning effort, and first-scan command. A scan with `--dry-run`
 also reports its effective model and reasoning effort, including `--codex`
 overrides, without starting Codex or contacting the network.
@@ -444,7 +446,7 @@ Preflight checks the ID's format; authentication is checked when the scan starts
 to run a separate standard scan for each component of one local project:
 
 ```bash
-npx @openai/codex-security scan-components /path/to/project \
+npx @bex-co/bex-security scan-components /path/to/project \
   --component apps/api --component apps/web --component packages/shared \
   --workers 4 --output-dir /path/outside/project/results
 ```
@@ -457,9 +459,9 @@ Use `--auto` instead of `--component` to let Codex propose the split. To review
 or edit it first, save a plan, then run that plan into a new output directory:
 
 ```bash
-npx @openai/codex-security scan-components /path/to/project \
+npx @bex-co/bex-security scan-components /path/to/project \
   --auto --plan-only --output-dir /path/outside/project/plan
-npx @openai/codex-security scan-components /path/to/project \
+npx @bex-co/bex-security scan-components /path/to/project \
   --components-file /path/outside/project/plan/components.json \
   --output-dir /path/outside/project/results
 ```
@@ -620,7 +622,7 @@ Use `--model` and `--effort` for model selection. Repeat
 configuration:
 
 ```bash
-npx @openai/codex-security scan . \
+npx @bex-co/bex-security scan . \
   --model gpt-5.6-terra \
   --effort high \
   --codex features.multi_agent_v2.max_concurrent_threads_per_session=4
@@ -767,10 +769,10 @@ finish above the limit; preparing the partial report makes no additional model
 requests. Incomplete coverage retains its existing exit code.
 For `bulk-scan`, the limit applies separately to each repository attempt.
 
-Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
+Run `npx @bex-co/bex-security scan --help` or `npx @bex-co/bex-security bulk-scan --help`
 for the complete CLI references.
 
-Sign in with `gh auth login`, then run `npx @openai/codex-security bulk-scan` to discover
+Sign in with `gh auth login`, then run `npx @bex-co/bex-security bulk-scan` to discover
 GitHub repositories pushed in the last 90 days. Archived
 repositories and forks are excluded. Search the repository list, select the
 repositories to scan, and confirm before scanning.
@@ -808,7 +810,7 @@ same command to resume.
 Choose completed scans from your local history:
 
 ```bash
-npx @openai/codex-security publish scan --to cloud --dry-run --json
+npx @bex-co/bex-security publish scan --to cloud --dry-run --json
 ```
 
 The picker shows each scan's repository, finding count, age, and scan ID.
@@ -820,7 +822,7 @@ For scripts, repeat `--scan` with saved scan IDs or unique ID prefixes (at
 least eight characters):
 
 ```bash
-npx @openai/codex-security publish scan \
+npx @bex-co/bex-security publish scan \
   --scan SCAN_ID_A --scan SCAN_ID_B \
   --to cloud --dry-run --json
 ```
@@ -889,7 +891,7 @@ The SDK adapts the bundled discovery workflow without changing the plugin.
 An incompatible plugin workflow stops the scan instead of using default validation.
 
 ```bash
-npx @openai/codex-security scan . --validation-prompt-file validation.md
+npx @bex-co/bex-security scan . --validation-prompt-file validation.md
 ```
 
 The SDK accepts the same text as `validationPrompt`:
@@ -952,7 +954,7 @@ Publish every finding from a completed standard, deep, or scoped scan to one
 Linear team:
 
 ```bash
-npx @openai/codex-security publish scan --scan SCAN_ID \
+npx @bex-co/bex-security publish scan --scan SCAN_ID \
   --to linear \
   --linear-team TEAM_ID
 ```
@@ -970,7 +972,7 @@ scan selector. The selector highlights each repository and shows its finding
 count, relative run time, and abbreviated scan ID:
 
 ```bash
-npx @openai/codex-security publish scan \
+npx @bex-co/bex-security publish scan \
   --to linear \
   --linear-team TEAM_ID
 ```
@@ -993,7 +995,7 @@ Linear personal API key:
 
 ```bash
 export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
-npx @openai/codex-security publish scan /path/to/completed-scan \
+npx @bex-co/bex-security publish scan /path/to/completed-scan \
   --to linear \
   --linear-team TEAM_ID
 ```
@@ -1014,7 +1016,7 @@ Use `publish check` to verify that the completed scan and its findings match
 local history, and to see which findings already have recorded Linear issues:
 
 ```bash
-npx @openai/codex-security publish check /path/to/completed-scan \
+npx @bex-co/bex-security publish check /path/to/completed-scan \
   --to linear --linear-team TEAM_ID --json
 ```
 
@@ -1067,7 +1069,7 @@ only skips issues already recorded in local history.
 You can also publish a scan from TypeScript:
 
 ```ts
-import { publishScan } from "@openai/codex-security";
+import { publishScan } from "@bex-co/bex-security";
 
 const publication = await publishScan("/path/to/completed-scan", {
   destination: "linear",
@@ -1174,7 +1176,7 @@ nonzero:
 
 ```bash
 SCAN_ROOT="$(mktemp -d)"
-npx @openai/codex-security scan . \
+npx @bex-co/bex-security scan . \
   --diff origin/main \
   --output-dir "$SCAN_ROOT/results" \
   --json \
@@ -1194,7 +1196,7 @@ document. CSV uses the portable findings columns, marks findings as open, and
 does not include local workbench triage state. The exporter validates the seal
 before writing, accepts `--output -` for stdout, and can use
 `--source-root /path/to/repository` with SARIF to add source-line fingerprints.
-Run `npx @openai/codex-security export --help` for all export options.
+Run `npx @bex-co/bex-security export --help` for all export options.
 
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional

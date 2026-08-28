@@ -12,7 +12,7 @@ import {
   type ScanResult,
   type ValidationOptions,
   type ValidationResult,
-} from "@openai/codex-security";
+} from "@bex-co/bex-security";
 
 const options: ScanOptions = {
   target: DiffTarget.refs({ base: "HEAD~1" }),

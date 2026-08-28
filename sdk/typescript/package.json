@@ -1,16 +1,35 @@
 {
-  "name": "@openai/codex-security",
-  "version": "0.1.20",
-  "description": "TypeScript SDK and CLI for Codex Security",
+  "name": "@bex-co/bex-security",
+  "version": "0.1.20-bex.1",
+  "description": "Agent-portable security scanning CLI and TypeScript SDK built on Codex Security and ACP",
   "license": "Apache-2.0",
-  "author": "OpenAI",
-  "homepage": "https://developers.openai.com/codex/security",
+  "author": "Bex Security",
+  "homepage": "https://github.com/bex-co/bex-security#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/openai/codex-security.git",
+    "url": "git+https://github.com/bex-co/bex-security.git",
     "directory": "sdk/typescript"
   },
-  "bugs": "https://github.com/openai/codex-security/issues",
+  "bugs": {
+    "url": "https://github.com/bex-co/bex-security/issues"
+  },
+  "keywords": [
+    "security",
+    "security-scanner",
+    "static-analysis",
+    "agent-client-protocol",
+    "acp",
+    "codex",
+    "claude",
+    "kimi",
+    "muse"
+  ],
+  "bex": {
+    "upstreamPackage": "@openai/codex-security",
+    "upstreamVersion": "0.1.20",
+    "upstreamCommit": "ebd7cd11b937f25fce0218dc542c93c1263a6ec9",
+    "upstreamRepository": "https://github.com/openai/codex-security"
+  },
   "type": "module",
   "engines": {
     "node": "^22.13.0 || ^24.0.0 || ^26.0.0"

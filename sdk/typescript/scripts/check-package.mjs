@@ -255,8 +255,15 @@ const packageJson = JSON.parse(
   archiveFile("package/package.json").toString("utf8"),
 );
 if (
-  packageJson.name !== "@openai/codex-security" ||
-  packageJson.license !== "Apache-2.0"
+  packageJson.name !== "@bex-co/bex-security" ||
+  packageJson.license !== "Apache-2.0" ||
+  packageJson.description !==
+    "Agent-portable security scanning CLI and TypeScript SDK built on Codex Security and ACP" ||
+  packageJson.repository?.url !==
+    "git+https://github.com/bex-co/bex-security.git" ||
+  packageJson.bex?.upstreamPackage !== "@openai/codex-security" ||
+  typeof packageJson.bex?.upstreamVersion !== "string" ||
+  typeof packageJson.bex?.upstreamCommit !== "string"
 ) {
   throw new Error("npm package does not contain the expected public metadata.");
 }

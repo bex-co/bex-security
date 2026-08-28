@@ -11,7 +11,7 @@ export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
 export const BUNDLED_PLUGIN_VERSION = "0.1.59" as const;
 
-const PACKAGE_NAME = "@openai/codex-security";
+const PACKAGE_NAME = "@bex-co/bex-security";
 
 export interface UpdateNotice {
   readonly currentVersion: string;
@@ -132,7 +132,7 @@ export async function checkForUpdate({
 
 export function formatUpdateNotice(notice: UpdateNotice): string {
   const lines = [
-    `Codex Security update available: ${notice.currentVersion} → ${notice.latestVersion}`,
+    `BEX SECURITY update available: ${notice.currentVersion} → ${notice.latestVersion}`,
     `Run: ${notice.command}`,
   ];
   const width = Math.max(...lines.map((line) => line.length));

@@ -127,7 +127,7 @@ jobs:
             --security-opt "seccomp=$GITHUB_WORKSPACE/docker/codex-security-seccomp.json"
             --entrypoint node
             codex-security:ci
-            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js
+            /usr/local/lib/node_modules/@bex-co/bex-security/node_modules/@openai/codex/bin/codex.js
           )
 
           if output="$("${command[@]}" sandbox /usr/bin/true 2>&1)"; then

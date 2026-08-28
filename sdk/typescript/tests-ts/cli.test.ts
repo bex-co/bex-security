@@ -1688,14 +1688,14 @@ describe("CLI", () => {
       );
       expect(child.status).toBe(0);
       expect(child.stdout).toContain(
-        "command: npx --yes @openai/codex-security --mcp",
+        "command: npx --yes @bex-co/bex-security --mcp",
       );
       const config = JSON.parse(
         await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
       );
       expect(config["amp.mcpServers"]["codex-security"]).toEqual({
         command: "npx",
-        args: ["--yes", "@openai/codex-security", "--mcp"],
+        args: ["--yes", "@bex-co/bex-security", "--mcp"],
       });
     } finally {
       await rm(home, { recursive: true, force: true });

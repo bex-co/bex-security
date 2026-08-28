@@ -3,6 +3,7 @@
 **Open security workflows for every coding agent and model.**
 
 [![Upstream: openai/codex-security](https://img.shields.io/badge/upstream-openai%2Fcodex--security-111827)](https://github.com/openai/codex-security)
+[![npm: @bex-co/bex-security](https://img.shields.io/npm/v/%40bex-co%2Fbex-security?label=npm)](https://www.npmjs.com/package/@bex-co/bex-security)
 [![ACP alpha](https://img.shields.io/badge/ACP-Codex%20%2B%20Claude%20%2B%20Kimi%20%2B%20Muse%20alpha-7c3aed)](https://github.com/agentclientprotocol)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
@@ -22,7 +23,20 @@ upstream security improvements.
 ## Quick start
 
 Requires Node.js 22.13.0 or later in the 22.x release line, Node.js 24.x or
-Node.js 26.x, pnpm, and Python 3.10 or later.
+Node.js 26.x, and Python 3.10 or later.
+
+```bash
+npm install --global @bex-co/bex-security
+bex-security scan /path/to/repository --agent claude
+```
+
+Or run directly without a global installation:
+
+```bash
+npx @bex-co/bex-security scan /path/to/repository --agent claude
+```
+
+To work from source, clone the repository and install it with pnpm:
 
 ```bash
 git clone https://github.com/bex-co/bex-security.git
@@ -55,26 +69,27 @@ bex-security --help
 
 ## Project status
 
-Bex Security is an early-stage fork. The current codebase preserves the
-upstream package name and CLI behavior so existing workflows keep working. Its
-first ACP vertical slice runs Codex sessions through `codex-acp`, and its first
-pluggable agent integrations run Claude Code through `claude-agent-acp` and
-Kimi Code through its native `kimi acp` server.
+Bex Security is an early-stage fork published as `@bex-co/bex-security`. It
+preserves the upstream CLI behavior and `codex-security` command alias while
+making `bex-security` the primary command. Its first ACP vertical slice runs
+Codex sessions through `codex-acp`, and its pluggable agent integrations run
+Claude Code through `claude-agent-acp` and Kimi Code through its native `kimi
+acp` server.
 Muse Code runs through Bex's community `muse-code-acp` adapter.
 
-| Capability                                       | Status                            |
-| ------------------------------------------------ | --------------------------------- |
-| Codex Security-compatible CLI and TypeScript SDK | Available                         |
-| Multiple inference-provider paths                | Available                         |
-| Repeatable upstream merge workflow               | Available                         |
-| Codex sessions over ACP v1 and `codex-acp`       | Alpha                             |
-| Claude Code sessions over `claude-agent-acp`     | Alpha                             |
-| Kimi Code sessions over native `kimi acp`        | Alpha                             |
-| Muse Code sessions over `muse-code-acp`          | Alpha                             |
-| Kimi models through Claude Code                  | Alpha                             |
-| Additional ACP agents                            | Contributors welcome              |
-| Bex-branded CLI (`bex-security`)                 | Available                         |
-| Bex-branded npm package                          | Planned with a compatibility path |
+| Capability                                       | Status               |
+| ------------------------------------------------ | -------------------- |
+| Codex Security-compatible CLI and TypeScript SDK | Available            |
+| Multiple inference-provider paths                | Available            |
+| Repeatable upstream merge workflow               | Available            |
+| Codex sessions over ACP v1 and `codex-acp`       | Alpha                |
+| Claude Code sessions over `claude-agent-acp`     | Alpha                |
+| Kimi Code sessions over native `kimi acp`        | Alpha                |
+| Muse Code sessions over `muse-code-acp`          | Alpha                |
+| Kimi models through Claude Code                  | Alpha                |
+| Additional ACP agents                            | Contributors welcome |
+| Bex-branded CLI (`bex-security`)                 | Available            |
+| Bex-branded npm package                          | Available            |
 
 ### Target architecture
 
@@ -173,8 +188,9 @@ for every agent.
 5. **Expand by evidence:** publish a capability-based compatibility matrix for
    agents and the models they expose. Keep draft ACP v2 support experimental
    until the protocol stabilizes.
-6. **Graduate the package brand:** publish a Bex package with a clear migration
-   path for existing `@openai/codex-security` users.
+6. **Release independently:** publish Bex builds as
+   `upstreamVersion-bex.N`, with package metadata recording the exact upstream
+   baseline.
 
 Want to help? High-leverage contributions include ACP protocol mapping,
 official-schema contract fixtures, agent/model compatibility reports, upstream
@@ -184,11 +200,12 @@ support first.
 
 ## Upstream compatibility
 
-Until Bex publishes its own package, the TypeScript package keeps the upstream
-`@openai/codex-security` name. The Bex checkout and documentation use the
-`bex-security` command, while `codex-security` remains a compatible alias. See
-the [upstream Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)
-for the complete CLI reference and
+Bex publishes the TypeScript SDK and CLI as `@bex-co/bex-security`. The
+`bex-security` command is primary, while `codex-security` remains a compatible
+alias for existing scripts. Bex releases use `upstreamVersion-bex.N` and record
+their upstream package version and commit in npm metadata. See the [upstream
+Codex Security documentation](https://learn.chatgpt.com/docs/security/cli) for
+the complete CLI reference and
 [upstream releases](https://github.com/openai/codex-security/releases) for the
 canonical changelog and upgrade notes.
 
@@ -476,7 +493,7 @@ sessions. These events can contain credentials.
 Codex Security is a Javascript package:
 
 ```ts
-import { CodexSecurity } from "@openai/codex-security";
+import { CodexSecurity } from "@bex-co/bex-security";
 
 const security = new CodexSecurity();
 const result = await security.run("/path/to/directory");

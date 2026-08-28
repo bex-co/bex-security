@@ -656,6 +656,34 @@ describe("stable npm release versions", () => {
     ).toBe("0.1.2");
   });
 
+  test("uses the recorded upstream version for the Bex package", () => {
+    expect(
+      releaseVersion({
+        name: "@bex-co/bex-security",
+        version: "0.1.2-bex.3",
+        bex: {
+          upstreamPackage: "@openai/codex-security",
+          upstreamVersion: "0.1.2",
+        },
+      }),
+    ).toBe("0.1.2");
+  });
+
+  test("rejects Bex metadata that names another upstream package", () => {
+    expect(() =>
+      releaseVersion({
+        name: "@bex-co/bex-security",
+        version: "0.1.2-bex.3",
+        bex: {
+          upstreamPackage: "example",
+          upstreamVersion: "0.1.2",
+        },
+      }),
+    ).toThrow(
+      "Bex release metadata must identify @openai/codex-security as upstream.",
+    );
+  });
+
   test("rejects another package", () => {
     expect(() =>
       releaseVersion({ name: "codex-security", version: "0.1.2" }),
@@ -1656,11 +1684,15 @@ describe("idempotent GitHub release verification", () => {
 });
 
 describe("GitHub release workflow safeguards", () => {
-  const checkedOutVersion = releaseVersion(
-    JSON.parse(
-      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    ) as ReleaseMetadata,
-  );
+  const checkedOutPackage = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  ) as {
+    bex?: { upstreamPackage?: unknown; upstreamVersion?: unknown };
+  };
+  const checkedOutVersion = releaseVersion({
+    name: checkedOutPackage.bex?.upstreamPackage,
+    version: checkedOutPackage.bex?.upstreamVersion,
+  });
   const checkedOutTag = `npm-v${checkedOutVersion}`;
 
   test("rejects unsupported jq mock filters", () => {
@@ -4184,7 +4216,7 @@ describe("GitHub release workflow safeguards", () => {
     const start = "<!-- codex-security-release-summary:start -->";
     const end = "<!-- codex-security-release-summary:end -->";
     const recovery = releasingGuide.slice(
-      releasingGuide.indexOf("## Recover or repair a release"),
+      releasingGuide.indexOf("### Recover or repair an upstream release"),
     );
     const markerBlock =
       [...recovery.matchAll(/^```text\r?\n([\s\S]*?)^```[ \t]*$/gmu)]

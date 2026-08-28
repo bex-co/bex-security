@@ -1,13 +1,16 @@
 # Security policy
 
-Codex Security is a local tool for reviewing repositories you trust and have
+Bex Security is a local tool for reviewing repositories you trust and have
 permission to assess. This policy explains which security issues are in scope
 and how to report them.
 
-## Report a vulnerability in Codex Security
+## Report a vulnerability
 
-Report vulnerabilities in the CLI, SDK, bundled plugin, scan runtime, or
-published release artifacts privately through
+Report vulnerabilities in Bex-specific CLI, SDK, ACP, packaging, or release
+behavior through this repository's private
+[GitHub security advisory form](https://github.com/bex-co/bex-security/security/advisories/new).
+Report vulnerabilities that reproduce in the unmodified upstream Codex
+Security project through
 [OpenAI's Bugcrowd program](https://bugcrowd.com/engagements/openai).
 
 Do not post unpatched vulnerabilities, exploits, credentials, sensitive scan
@@ -22,7 +25,8 @@ explains the reporting process, confidentiality, and program eligibility.
 
 This policy applies to:
 
-- The published `@openai/codex-security` package and `codex-security` CLI.
+- The published `@bex-co/bex-security` package and its `bex-security` and
+  compatibility `codex-security` CLIs.
 - The TypeScript SDK, including target selection, authentication,
   configuration, execution, and result validation.
 - The Codex Security plugin, interpreter, and Codex runtime bundled with an
