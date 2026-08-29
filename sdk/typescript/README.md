@@ -3,8 +3,9 @@
 Open-source TypeScript SDK and CLI for running evidence-backed Bex Security
 scans with Codex, Claude Code, Kimi Code, Muse Code, and additional ACP agents.
 The ESM-only package includes TypeScript declarations, the `bex-security` and
-`codex-security` executables, and the matching Codex runtime. Both executable
-names run the same CLI; `codex-security` remains available for compatibility.
+`codex-security` executables, the generated security plugin, and the matching
+Codex runtime. Both executable names run the same CLI; `codex-security` remains
+available for compatibility.
 
 > [!NOTE]
 > Versions use `upstreamVersion-bex.N`, so the upstream Codex Security baseline
@@ -21,6 +22,19 @@ npx @bex-co/bex-security --version
 Use Node.js 22.13.0+ (22.x), 24.x, or 26.x on macOS, Linux, or Windows.
 Scans, exports, scan history, and saved findings also need Python 3.10+
 (plus `tomli` on Python 3.10).
+
+To run from a source checkout instead of the published npm package, install
+both dependency trees before building the bundled plugin and CLI:
+
+```bash
+git clone https://github.com/bex-co/bex-security.git
+cd bex-security
+pnpm --dir sdk/typescript install --frozen-lockfile
+npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+pnpm --dir sdk/typescript run build:plugin
+pnpm --dir sdk/typescript run build
+./bex-security scan /path/to/repository --agent claude
+```
 
 ## Run a scan from TypeScript
 

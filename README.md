@@ -36,12 +36,18 @@ Or run directly without a global installation:
 npx @bex-co/bex-security scan /path/to/repository --agent claude
 ```
 
-To work from source, clone the repository and install it with pnpm:
+The published npm package already contains the generated security plugin; the
+additional build steps below apply only to a source checkout.
+
+To work from source, clone the repository, install both dependency trees, and
+build the bundled plugin and CLI:
 
 ```bash
 git clone https://github.com/bex-co/bex-security.git
 cd bex-security
 pnpm --dir sdk/typescript install --frozen-lockfile
+npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+pnpm --dir sdk/typescript run build:plugin
 pnpm --dir sdk/typescript run build
 ./bex-security scan /path/to/repository --agent claude
 ```
