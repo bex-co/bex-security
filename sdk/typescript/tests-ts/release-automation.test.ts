@@ -495,43 +495,46 @@ describe("reviewed release note helpers", () => {
     );
   });
 
-  test("rejects NUL bytes before shell composition", () => {
-    const workspace = mkdtempSync(join(tmpdir(), "release-notes-nul-"));
-    try {
-      const taggedNotes = join(workspace, "tagged-notes.md");
-      const generatedNotes = join(workspace, "generated-notes.md");
-      writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
-      writeFileSync(generatedNotes, "Generated release notes\n");
+  test.skipIf(process.platform === "win32")(
+    "rejects NUL bytes before shell composition",
+    () => {
+      const workspace = mkdtempSync(join(tmpdir(), "release-notes-nul-"));
+      try {
+        const taggedNotes = join(workspace, "tagged-notes.md");
+        const generatedNotes = join(workspace, "generated-notes.md");
+        writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
+        writeFileSync(generatedNotes, "Generated release notes\n");
 
-      const result = spawnSync(
-        bash,
-        [
-          "-c",
+        const result = spawnSync(
+          bash,
           [
-            "set -euo pipefail",
-            'published_notes="$(node "$AUTOMATION_SCRIPT" compose-release-notes 1.2.3 "$GENERATED_NOTES" --tagged-notes-file "$TAGGED_NOTES")"',
-            'printf "%s" "$published_notes"',
-          ].join("\n"),
-        ],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            AUTOMATION_SCRIPT: fileURLToPath(automationScript),
-            GENERATED_NOTES: generatedNotes,
-            TAGGED_NOTES: taggedNotes,
+            "-c",
+            [
+              "set -euo pipefail",
+              'published_notes="$(node "$AUTOMATION_SCRIPT" compose-release-notes 1.2.3 "$GENERATED_NOTES" --tagged-notes-file "$TAGGED_NOTES")"',
+              'printf "%s" "$published_notes"',
+            ].join("\n"),
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              AUTOMATION_SCRIPT: fileURLToPath(automationScript),
+              GENERATED_NOTES: generatedNotes,
+              TAGGED_NOTES: taggedNotes,
+            },
+            timeout: 10_000,
           },
-          timeout: 10_000,
-        },
-      );
+        );
 
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain("include a reviewed summary");
-      expect(result.stderr).not.toContain("ignored null byte");
-    } finally {
-      rmSync(workspace, { recursive: true, force: true });
-    }
-  });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("include a reviewed summary");
+        expect(result.stderr).not.toContain("ignored null byte");
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.each([
     {

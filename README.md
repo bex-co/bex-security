@@ -20,6 +20,19 @@ upstream security improvements.
 > ⭐ If you want security tooling that is portable across agents, editors, and
 > models, star this repository and watch the roadmap.
 
+## Supported Agents
+
+Run the same evidence-driven security workflow with your preferred coding
+agent. Codex is the default; Claude Code, Kimi Code, and Muse Code support is
+currently alpha.
+
+<p>
+  <a href="https://github.com/openai/codex"><kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&amp;sz=64" alt="Codex logo" width="16" valign="middle" /> Codex</kbd></a> &nbsp;
+  <a href="https://code.claude.com/docs/en/overview"><kbd><img src="https://www.google.com/s2/favicons?domain=anthropic.com&amp;sz=64" alt="Claude Code logo" width="16" valign="middle" /> Claude Code</kbd></a> &nbsp;
+  <a href="https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started.html"><kbd><img src="https://www.google.com/s2/favicons?domain=moonshot.cn&amp;sz=64" alt="Kimi Code logo" width="16" valign="middle" /> Kimi Code</kbd></a> &nbsp;
+  <a href="https://dev.meta.ai/docs/muse-code/"><kbd><img src="https://www.google.com/s2/favicons?domain=meta.ai&amp;sz=64" alt="Muse Code logo" width="16" valign="middle" /> Muse Code</kbd></a>
+</p>
+
 ## Quick start
 
 Requires Node.js 22.13.0 or later in the 22.x release line, Node.js 24.x or
