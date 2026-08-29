@@ -2986,6 +2986,26 @@ export async function main(
           },
         )
         .refine(
+          (options) =>
+            options.agent !== "qwen" ||
+            options.provider === undefined ||
+            options.provider === "openai",
+          {
+            message:
+              "--agent qwen uses the provider configured by Qwen Code and does not accept --provider.",
+          },
+        )
+        .refine(
+          (options) =>
+            options.agent !== "mimo" ||
+            options.provider === undefined ||
+            options.provider === "openai",
+          {
+            message:
+              "--agent mimo uses the provider configured by MiMo Code and does not accept --provider.",
+          },
+        )
+        .refine(
           (options) => options.agent === "codex" || options.codex.length === 0,
           { message: "--codex is only available with --agent codex." },
         )
@@ -3058,6 +3078,8 @@ export async function main(
         },
         { args: { repository: "." }, options: { agent: "kimi" } },
         { args: { repository: "." }, options: { agent: "muse" } },
+        { args: { repository: "." }, options: { agent: "qwen" } },
+        { args: { repository: "." }, options: { agent: "mimo" } },
         { args: { repository: "." }, options: { path: ["src"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
         {
@@ -6346,6 +6368,14 @@ async function chooseInteractiveAuthentication(
   );
 }
 
+function acpAgentDisplayName(agent: Exclude<AcpAgentName, "codex">): string {
+  if (agent === "claude") return "Claude Code";
+  if (agent === "kimi") return "Kimi Code";
+  if (agent === "muse") return "Muse Code";
+  if (agent === "qwen") return "Qwen Code";
+  return "MiMo Code";
+}
+
 async function runScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
@@ -6625,7 +6655,10 @@ async function executeScan(
           reasoningEffort: effectiveReasoningEffort,
         },
         usageAtCompletion:
-          arguments_.agent === "claude" || arguments_.agent === "muse",
+          arguments_.agent === "claude" ||
+          arguments_.agent === "muse" ||
+          arguments_.agent === "qwen" ||
+          arguments_.agent === "mimo",
         ...(arguments_.maxCostUsd === undefined
           ? {}
           : { maxCostUsd: arguments_.maxCostUsd }),
@@ -6769,13 +6802,9 @@ async function executeScan(
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
         const agentName =
-          authentication.method !== "agent"
-            ? null
-            : authentication.agent === "claude"
-              ? "Claude Code"
-              : authentication.agent === "kimi"
-                ? "Kimi Code"
-                : "Muse Code";
+          authentication.method === "agent"
+            ? acpAgentDisplayName(authentication.agent)
+            : null;
         diagnostic("authentication.selected", {
           requested: auth ?? "auto",
           method: authentication.method,

@@ -202,6 +202,116 @@ describe("ACP adapter", () => {
     expect(completedMessage(events)).toBe("new:allow");
   });
 
+  test("runs Qwen through ACP and negotiates its model and effort", async () => {
+    const thread = new AcpAgentClient(
+      {
+        env: {
+          ...process.env,
+          BEX_TEST_EXPECT_PROMPT: "keep the target source read-only",
+        },
+      },
+      {
+        agent: "qwen",
+        model: "qwen3-coder-plus",
+        reasoningEffort: "high",
+      },
+      AGENT_PATH,
+    ).startThread({ workingDirectory: process.cwd() });
+
+    const events = await collect(
+      (await thread.runStreamed("scan with Qwen")).events,
+    );
+
+    expect(thread.modelConfiguration).toEqual({
+      model: "qwen3-coder-plus",
+      reasoningEffort: "high",
+    });
+    expect(completedMessage(events)).toBe("new:allow");
+  });
+
+  test("maps MiMo effort to an advertised model variant", async () => {
+    const thread = new AcpAgentClient(
+      {
+        env: {
+          ...process.env,
+          BEX_TEST_AGENT: "mimo",
+          BEX_TEST_REJECT_MODE_CONFIG: "1",
+          BEX_TEST_EXPECT_PROMPT: "keep the target source read-only",
+        },
+      },
+      { agent: "mimo", reasoningEffort: "high" },
+      AGENT_PATH,
+    ).startThread({ workingDirectory: process.cwd() });
+
+    const events = await collect(
+      (await thread.runStreamed("scan with MiMo")).events,
+    );
+
+    expect(thread.modelConfiguration).toEqual({
+      model: "xiaomi/mimo-v2.5-pro/high",
+      reasoningEffort: "high",
+    });
+    expect(completedMessage(events)).toBe("new:allow");
+  });
+
+  test("reports unavailable MiMo effort variants", async () => {
+    const thread = new AcpAgentClient(
+      {
+        env: { ...process.env, BEX_TEST_AGENT: "mimo" },
+      },
+      { agent: "mimo", reasoningEffort: "max" },
+      AGENT_PATH,
+    ).startThread({ workingDirectory: process.cwd() });
+
+    await expect(
+      collect((await thread.runStreamed("scan with MiMo")).events),
+    ).rejects.toThrow(
+      'MiMo ACP does not offer effort "max" for model "xiaomi/mimo-v2.5-pro". Available variants: low, high.',
+    );
+  });
+
+  test("switches between advertised MiMo effort variants", async () => {
+    const thread = new AcpAgentClient(
+      {
+        env: { ...process.env, BEX_TEST_AGENT: "mimo" },
+      },
+      {
+        agent: "mimo",
+        model: "xiaomi/mimo-v2.5-pro/low",
+        reasoningEffort: "high",
+      },
+      AGENT_PATH,
+    ).startThread({ workingDirectory: process.cwd() });
+
+    await collect((await thread.runStreamed("scan with MiMo")).events);
+
+    expect(thread.modelConfiguration).toEqual({
+      model: "xiaomi/mimo-v2.5-pro/high",
+      reasoningEffort: "high",
+    });
+  });
+
+  test.each([
+    ["qwen", "Qwen Code"],
+    ["mimo", "MiMo Code"],
+  ] as const)("reports missing %s executables", async (agent, label) => {
+    await expect(
+      new AcpAgentClient({ env: { PATH: "" } }, { agent }).capabilities(),
+    ).rejects.toThrow(`${label} CLI was not found on PATH`);
+  });
+
+  test("adds Qwen authentication setup guidance", async () => {
+    await expect(
+      new AcpAgentClient(
+        {
+          env: { ...process.env, BEX_TEST_AUTH_ERROR: "1" },
+        },
+        { agent: "qwen" },
+        AGENT_PATH,
+      ).capabilities(),
+    ).rejects.toThrow("configure authentication with `/auth`");
+  });
+
   test("runs Muse through ACP session modes without additional directories", async () => {
     const root = await mkdtemp(join(tmpdir(), "bex-muse-acp-"));
     const repository = join(root, "repository");

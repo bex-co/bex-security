@@ -224,6 +224,43 @@ describe("CLI", () => {
     expect(config?.codexOverrides).not.toHaveProperty("model_provider");
   });
 
+  test.each([
+    ["Qwen", "qwen", "qwen3-coder-plus"],
+    ["MiMo", "mimo", "xiaomi/mimo-v2.5-pro"],
+  ] as const)(
+    "routes scans through native %s ACP",
+    async (_name, agent, model) => {
+      let config: CodexSecurityConfig | undefined;
+
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            "--agent",
+            agent,
+            "--model",
+            model,
+            "--effort",
+            "high",
+            "--json",
+          ],
+          capture().stream,
+          capture().stream,
+          dependencies({ onConfig: (value) => (config = value) }),
+        ),
+      ).toBe(0);
+      expect(config).toMatchObject({
+        agent,
+        codexOverrides: {
+          model,
+          model_reasoning_effort: "high",
+        },
+      });
+      expect(config?.codexOverrides).not.toHaveProperty("model_provider");
+    },
+  );
+
   test("passes the safety identifier as a per-scan option", async () => {
     let options: unknown;
     const stderr = capture();
@@ -269,7 +306,9 @@ describe("CLI", () => {
       args: { properties: { repository: { type: "string" } } },
       options: {
         properties: {
-          agent: { enum: ["codex", "claude", "kimi", "muse"] },
+          agent: {
+            enum: ["codex", "claude", "kimi", "muse", "qwen", "mimo"],
+          },
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
           workers: { type: "integer" },
@@ -2521,6 +2560,8 @@ describe("CLI", () => {
     );
     expect(help.text()).toContain("codex-security scan . --agent kimi");
     expect(help.text()).toContain("codex-security scan . --agent muse");
+    expect(help.text()).toContain("codex-security scan . --agent qwen");
+    expect(help.text()).toContain("codex-security scan . --agent mimo");
     expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).not.toContain("codex-security scan . --path src,tests");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
@@ -2937,6 +2978,14 @@ describe("CLI", () => {
       [
         ["scan", ".", "--agent", "muse", "--provider", "openrouter"],
         "--agent muse uses the provider configured by Muse Code and does not accept --provider",
+      ],
+      [
+        ["scan", ".", "--agent", "qwen", "--provider", "openrouter"],
+        "--agent qwen uses the provider configured by Qwen Code and does not accept --provider",
+      ],
+      [
+        ["scan", ".", "--agent", "mimo", "--provider", "openrouter"],
+        "--agent mimo uses the provider configured by MiMo Code and does not accept --provider",
       ],
       [
         ["scan", ".", "--effort", "ultra"],
@@ -3387,39 +3436,46 @@ describe("CLI", () => {
     expect(stderr.text()).toContain('reasoning_effort="high"');
   });
 
-  test("reruns saved Muse scans with the Muse ACP agent", async () => {
-    let rerunConfig: CodexSecurityConfig | undefined;
+  test.each([
+    ["Muse", "muse", "muse-spark-1.2"],
+    ["Qwen", "qwen", "qwen3-coder-plus"],
+    ["MiMo", "mimo", "xiaomi/mimo-v2.5-pro"],
+  ] as const)(
+    "reruns saved %s scans with the matching ACP agent",
+    async (_name, agent, model) => {
+      let rerunConfig: CodexSecurityConfig | undefined;
 
-    expect(
-      await main(
-        ["scans", "rerun", "scan-original", "--json"],
-        capture().stream,
-        capture().stream,
-        dependencies({
-          onConfig: (value) => (rerunConfig = value),
-          onWorkbench: () => ({
-            recipe: {
-              agent: "muse",
-              repository: "/original/repository",
-              target: { kind: "repository", paths: [] },
-              mode: "standard",
-              config: {
-                model: "muse-spark-1.2",
-                model_reasoning_effort: "high",
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original", "--json"],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onConfig: (value) => (rerunConfig = value),
+            onWorkbench: () => ({
+              recipe: {
+                agent,
+                repository: "/original/repository",
+                target: { kind: "repository", paths: [] },
+                mode: "standard",
+                config: {
+                  model,
+                  model_reasoning_effort: "high",
+                },
               },
-            },
+            }),
           }),
-        }),
-      ),
-    ).toBe(0);
-    expect(rerunConfig).toMatchObject({
-      agent: "muse",
-      codexOverrides: {
-        model: "muse-spark-1.2",
-        model_reasoning_effort: "high",
-      },
-    });
-  });
+        ),
+      ).toBe(0);
+      expect(rerunConfig).toMatchObject({
+        agent,
+        codexOverrides: {
+          model,
+          model_reasoning_effort: "high",
+        },
+      });
+    },
+  );
 
   test("reports selected profile settings for verbose scan reruns", async () => {
     const stdout = capture();

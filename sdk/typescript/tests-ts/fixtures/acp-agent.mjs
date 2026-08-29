@@ -29,6 +29,7 @@ let configOptions = [
       { value: "sonnet", name: "Sonnet" },
       { value: "kimi-code/k3-256k", name: "K3-256k" },
       { value: "muse-spark-1.2", name: "Muse Spark 1.2" },
+      { value: "qwen3-coder-plus", name: "Qwen3 Coder Plus" },
     ],
   },
   {
@@ -49,24 +50,64 @@ if (process.env.BEX_TEST_AGENT === "muse") {
   configOptions = configOptions.filter((option) => option.category !== "mode");
 }
 
-const app = agent({ name: "bex-security-test-agent" })
-  .onRequest(methods.agent.initialize, () => ({
-    protocolVersion: PROTOCOL_VERSION,
-    agentCapabilities: {
-      sessionCapabilities: { resume: {} },
+if (process.env.BEX_TEST_AGENT === "mimo") {
+  configOptions = [
+    {
+      id: "mode",
+      name: "Session Mode",
+      category: "mode",
+      type: "select",
+      currentValue: "build",
+      options: [
+        { value: "build", name: "build" },
+        { value: "plan", name: "plan" },
+      ],
     },
-    ...(process.env.BEX_TEST_AGENT === "muse"
-      ? {
-          _meta: {
-            "bex.security/capabilities": {
-              delegatedWorkers: false,
-              usage: "unavailable",
-              interactivePermissions: false,
+    {
+      id: "model",
+      name: "Model",
+      category: "model",
+      type: "select",
+      currentValue: "xiaomi/mimo-v2.5-pro",
+      options: [
+        { value: "xiaomi/mimo-v2.5-pro", name: "MiMo V2.5 Pro" },
+        {
+          value: "xiaomi/mimo-v2.5-pro/low",
+          name: "MiMo V2.5 Pro (low)",
+        },
+        {
+          value: "xiaomi/mimo-v2.5-pro/high",
+          name: "MiMo V2.5 Pro (high)",
+        },
+      ],
+    },
+  ];
+}
+
+const app = agent({ name: "bex-security-test-agent" })
+  .onRequest(methods.agent.initialize, () => {
+    if (process.env.BEX_TEST_AUTH_ERROR) {
+      process.stderr.write("authentication required\n");
+      throw new Error("authentication required");
+    }
+    return {
+      protocolVersion: PROTOCOL_VERSION,
+      agentCapabilities: {
+        sessionCapabilities: { resume: {} },
+      },
+      ...(process.env.BEX_TEST_AGENT === "muse"
+        ? {
+            _meta: {
+              "bex.security/capabilities": {
+                delegatedWorkers: false,
+                usage: "unavailable",
+                interactivePermissions: false,
+              },
             },
-          },
-        }
-      : {}),
-  }))
+          }
+        : {}),
+    };
+  })
   .onRequest(methods.agent.session.new, ({ params }) => {
     if (
       process.env.BEX_TEST_EXPECT_CWD &&
@@ -99,6 +140,9 @@ const app = agent({ name: "bex-security-test-agent" })
     return {};
   })
   .onRequest(methods.agent.session.setConfigOption, ({ params }) => {
+    if (process.env.BEX_TEST_REJECT_MODE_CONFIG && params.configId === "mode") {
+      throw new Error("mode configuration must remain unchanged");
+    }
     configOptions = configOptions.map((option) =>
       option.id === params.configId
         ? { ...option, currentValue: params.value }

@@ -1,7 +1,8 @@
 # `@bex-co/bex-security`
 
 Open-source TypeScript SDK and CLI for running evidence-backed Bex Security
-scans with Codex, Claude Code, Kimi Code, Muse Code, and additional ACP agents.
+scans with Codex, Claude Code, Kimi Code, Muse Code, Qwen Code, MiMo Code, and
+additional ACP agents.
 The ESM-only package includes TypeScript declarations, the `bex-security` and
 `codex-security` executables, the generated security plugin, and the matching
 Codex runtime. Both executable names run the same CLI; `codex-security` remains
@@ -147,13 +148,13 @@ failures reject the import. Pass `signal` to cancel.
 
 Constructor options:
 
-| Option           | Description                                                                 |
-| ---------------- | --------------------------------------------------------------------------- |
-| `agent`          | Select `"codex"` (default), `"claude"`, `"kimi"`, or `"muse"` ACP agent.    |
-| `claudeProvider` | Select `"zai"` or `"kimi"` to route the Claude agent through that provider. |
-| `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin. |
-| `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                   |
-| `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.        |
+| Option           | Description                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------- |
+| `agent`          | Select `"codex"` (default), `"claude"`, `"kimi"`, `"muse"`, `"qwen"`, or `"mimo"`. |
+| `claudeProvider` | Select `"zai"` or `"kimi"` to route the Claude agent through that provider.        |
+| `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin.        |
+| `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                          |
+| `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.               |
 
 Options for `security.run(repository, options)` and
 `security.preflight(repository, options)`:
@@ -255,6 +256,33 @@ workbench through ACP; additional workspace roots and interactive approvals
 are not available through Muse Code 0.2.1. When the adapter reports that
 delegated workers are unavailable, Bex uses capability-selected host review
 assignments and accepts progress only from completed, non-truncated file reads.
+
+Qwen Code can run through its native ACP mode. Install it, start `qwen`, and
+use `/auth` once to configure a provider:
+
+```bash
+npm install --global @qwen-code/qwen-code@latest
+qwen
+npx @bex-co/bex-security scan . --agent qwen
+npx @bex-co/bex-security scan . --agent qwen --model qwen3-coder-plus --effort high
+```
+
+Bex starts `qwen --acp`; Qwen owns authentication and advertises available
+models and reasoning levels over ACP.
+
+MiMo Code can likewise run through its native ACP mode. Install it and finish
+its first-run provider setup before scanning:
+
+```bash
+npm install --global @mimo-ai/cli
+mimo
+npx @bex-co/bex-security scan . --agent mimo
+npx @bex-co/bex-security scan . --agent mimo --model xiaomi/mimo-v2.5-pro --effort high
+```
+
+Bex starts `mimo acp` and preserves MiMo's current primary agent mode. MiMo
+publishes reasoning choices as model variants, so `--effort` selects the
+matching advertised variant or fails with the available choices.
 
 For local use, sign in with ChatGPT:
 

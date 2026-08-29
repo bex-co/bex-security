@@ -22,7 +22,9 @@
     "codex",
     "claude",
     "kimi",
-    "muse"
+    "muse",
+    "qwen",
+    "mimo"
   ],
   "bex": {
     "upstreamPackage": "@openai/codex-security",

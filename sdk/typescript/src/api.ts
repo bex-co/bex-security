@@ -317,7 +317,7 @@ export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 export type ScanAuthentication =
   | {
       method: "agent";
-      agent: "claude" | "kimi" | "muse";
+      agent: Exclude<AcpAgentName, "codex">;
       verified: false;
     }
   | {
@@ -3507,8 +3507,7 @@ function acpAgentAuthentication(
   provider?: ClaudeModelProvider,
 ): ScanAuthentication {
   if (auth !== "auto") {
-    const label =
-      agent === "claude" ? "Claude" : agent === "kimi" ? "Kimi" : "Muse";
+    const label = acpAgentLabel(agent);
     throw new ConfigurationError(
       `${label} ACP manages its own authentication; --auth is only available with --agent codex.`,
     );
@@ -3528,6 +3527,14 @@ function acpAgentAuthentication(
     };
   }
   return { method: "agent", agent, verified: false };
+}
+
+function acpAgentLabel(agent: Exclude<AcpAgentName, "codex">): string {
+  if (agent === "claude") return "Claude";
+  if (agent === "kimi") return "Kimi";
+  if (agent === "muse") return "Muse";
+  if (agent === "qwen") return "Qwen";
+  return "MiMo";
 }
 
 function zaiClaudeEnvironment(

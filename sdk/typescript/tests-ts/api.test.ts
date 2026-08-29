@@ -1528,6 +1528,27 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each([
+    ["Qwen", "qwen"],
+    ["MiMo", "mimo"],
+  ] as const)(
+    "reports %s authentication and model defaults",
+    async (_name, agent) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      const client = new TestClient({ agent }, { environment: {} });
+
+      expect(await client.preflight(repository)).toMatchObject({
+        agent,
+        authentication: { method: "agent", agent, verified: false },
+        model: "default",
+        reasoningEffort: "default",
+      });
+      await client.close();
+    },
+  );
+
   test.each(EXTERNAL_PROVIDER_CASES)(
     "requires the %s API key instead of accepting another provider's credentials",
     async (name, provider, apiKey, model, providerConfig) => {

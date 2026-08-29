@@ -4,7 +4,7 @@
 
 [![Upstream: openai/codex-security](https://img.shields.io/badge/upstream-openai%2Fcodex--security-111827)](https://github.com/openai/codex-security)
 [![npm: @bex-co/bex-security](https://img.shields.io/npm/v/%40bex-co%2Fbex-security?label=npm)](https://www.npmjs.com/package/@bex-co/bex-security)
-[![ACP alpha](https://img.shields.io/badge/ACP-Codex%20%2B%20Claude%20%2B%20Kimi%20%2B%20Muse%20alpha-7c3aed)](https://github.com/agentclientprotocol)
+[![ACP alpha](https://img.shields.io/badge/ACP-Codex%20%2B%20Claude%20%2B%20Kimi%20%2B%20Muse%20%2B%20Qwen%20%2B%20MiMo%20alpha-7c3aed)](https://github.com/agentclientprotocol)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Bex Security is an upstream-first fork of
@@ -23,14 +23,16 @@ upstream security improvements.
 ## Supported Agents
 
 Run the same evidence-driven security workflow with your preferred coding
-agent. Codex is the default; Claude Code, Kimi Code, and Muse Code support is
-currently alpha.
+agent. Codex is the default; Claude Code, Kimi Code, Muse Code, Qwen Code, and
+MiMo Code support is currently alpha.
 
 <p>
   <a href="https://github.com/openai/codex"><kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&amp;sz=64" alt="Codex logo" width="16" valign="middle" /> Codex</kbd></a> &nbsp;
   <a href="https://code.claude.com/docs/en/overview"><kbd><img src="https://www.google.com/s2/favicons?domain=anthropic.com&amp;sz=64" alt="Claude Code logo" width="16" valign="middle" /> Claude Code</kbd></a> &nbsp;
   <a href="https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started.html"><kbd><img src="https://www.google.com/s2/favicons?domain=moonshot.cn&amp;sz=64" alt="Kimi Code logo" width="16" valign="middle" /> Kimi Code</kbd></a> &nbsp;
-  <a href="https://dev.meta.ai/docs/muse-code/"><kbd><img src="https://www.google.com/s2/favicons?domain=meta.ai&amp;sz=64" alt="Muse Code logo" width="16" valign="middle" /> Muse Code</kbd></a>
+  <a href="https://dev.meta.ai/docs/muse-code/"><kbd><img src="https://www.google.com/s2/favicons?domain=meta.ai&amp;sz=64" alt="Muse Code logo" width="16" valign="middle" /> Muse Code</kbd></a> &nbsp;
+  <a href="https://github.com/QwenLM/qwen-code"><kbd><img src="https://www.google.com/s2/favicons?domain=qwen.ai&amp;sz=64" alt="Qwen Code logo" width="16" valign="middle" /> Qwen Code</kbd></a> &nbsp;
+  <a href="https://github.com/XiaomiMiMo/MiMo-Code"><kbd><img src="https://www.google.com/s2/favicons?domain=xiaomi.com&amp;sz=64" alt="MiMo Code logo" width="16" valign="middle" /> MiMo Code</kbd></a>
 </p>
 
 ## Quick start
@@ -92,9 +94,9 @@ Bex Security is an early-stage fork published as `@bex-co/bex-security`. It
 preserves the upstream CLI behavior and `codex-security` command alias while
 making `bex-security` the primary command. Its first ACP vertical slice runs
 Codex sessions through `codex-acp`, and its pluggable agent integrations run
-Claude Code through `claude-agent-acp` and Kimi Code through its native `kimi
-acp` server.
-Muse Code runs through Bex's community `muse-code-acp` adapter.
+Claude Code through `claude-agent-acp`; Kimi Code, Qwen Code, and MiMo Code
+through their native ACP servers; and Muse Code through Bex's community
+`muse-code-acp` adapter.
 
 | Capability                                       | Status               |
 | ------------------------------------------------ | -------------------- |
@@ -105,6 +107,8 @@ Muse Code runs through Bex's community `muse-code-acp` adapter.
 | Claude Code sessions over `claude-agent-acp`     | Alpha                |
 | Kimi Code sessions over native `kimi acp`        | Alpha                |
 | Muse Code sessions over `muse-code-acp`          | Alpha                |
+| Qwen Code sessions over native `qwen --acp`      | Alpha                |
+| MiMo Code sessions over native `mimo acp`        | Alpha                |
 | Kimi models through Claude Code                  | Alpha                |
 | Additional ACP agents                            | Contributors welcome |
 | Bex-branded CLI (`bex-security`)                 | Available            |
@@ -141,6 +145,8 @@ flowchart TB
         claudeAcp["claude-agent-acp + Claude Code (current subprocess)"]
         kimiAcp["Kimi Code native ACP (current subprocess)"]
         museAcp["muse-code-acp + Muse Code (current subprocess)"]
+        qwenAcp["Qwen Code native ACP (current subprocess)"]
+        mimoAcp["MiMo Code native ACP (current subprocess)"]
         acp["additional compatible ACP agent (future subprocess)"]
     end
 
@@ -157,6 +163,8 @@ flowchart TB
     acpAdapter <-->|same ACP v1 transport| claudeAcp
     acpAdapter <-->|same ACP v1 transport| kimiAcp
     acpAdapter <-->|same ACP v1 transport| museAcp
+    acpAdapter <-->|same ACP v1 transport| qwenAcp
+    acpAdapter <-->|same ACP v1 transport| mimoAcp
     codexAcp <-->|Codex app-server JSON-RPC| codex
     acpAdapter -.->|future capability-tested driver| acp
     acpAdapter --> gateway
@@ -166,12 +174,15 @@ flowchart TB
     claudeAcp -->|Claude-owned model configuration| model
     kimiAcp -->|Kimi-owned model configuration| model
     museAcp -->|Muse-owned model configuration| model
+    qwenAcp -->|Qwen-owned model configuration| model
+    mimoAcp -->|MiMo-owned model configuration| model
     codex -->|provider-specific API| model
     acp -->|agent-owned model configuration| model
 ```
 
 The adapter makes Bex the ACP client and selects a small agent driver for
-`codex-acp`, `claude-agent-acp`, native `kimi acp`, or `muse-code-acp`. Bex
+`codex-acp`, `claude-agent-acp`, native `kimi acp`, `muse-code-acp`, native
+`qwen --acp`, or native `mimo acp`. Bex
 launches the selected agent per turn, negotiates ACP v1, creates or resumes its session, streams
 protocol updates into the existing scan observers, forwards cancellation, and
 preserves the current noninteractive permission boundary. The agent still owns
@@ -315,6 +326,36 @@ assignments and advances file coverage only for completed, non-truncated read
 operations. The existing scan command needs no Muse-specific orchestration
 flag.
 
+Qwen Code runs through its native ACP server. Install it, launch `qwen`, and
+use `/auth` once to configure a provider before scanning:
+
+```bash
+npm install --global @qwen-code/qwen-code@latest
+qwen
+./bex-security scan . --agent qwen
+./bex-security scan . --agent qwen --model qwen3-coder-plus --effort high
+```
+
+Bex starts `qwen --acp` and negotiates the models and reasoning levels
+advertised by Qwen Code. See the
+[Qwen Code quickstart](https://qwenlm.github.io/qwen-code-docs/en/users/quickstart/).
+
+MiMo Code also runs through its native ACP server. Install it and complete its
+first-run provider setup before scanning:
+
+```bash
+npm install --global @mimo-ai/cli
+mimo
+./bex-security scan . --agent mimo
+./bex-security scan . --agent mimo --model xiaomi/mimo-v2.5-pro --effort high
+```
+
+Bex starts `mimo acp` and preserves MiMo's current primary agent mode. MiMo
+exposes thinking levels as model variants, so `--effort high` selects the
+advertised `.../high` variant of the selected or current model. Bex reports an
+error with the available variants when the requested level is unavailable.
+See the [MiMo Code repository](https://github.com/XiaomiMiMo/MiMo-Code).
+
 Codex remains the default agent. Sign in with ChatGPT or provide an API key:
 
 ```bash
@@ -334,6 +375,8 @@ Common scan commands:
 ./bex-security scan . --agent claude --provider kimi
 ./bex-security scan . --agent kimi
 ./bex-security scan . --agent muse
+./bex-security scan . --agent qwen
+./bex-security scan . --agent mimo
 ./bex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 ./bex-security scan . --validation-prompt-file validation.md
 ./bex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
@@ -342,9 +385,10 @@ Common scan commands:
 For CI with Codex, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing
 in. `--agent claude` delegates authentication and model discovery to the local
 Claude Code installation unless a provider is selected. `--agent kimi`
-delegates both to the local Kimi Code installation, and `--agent muse`
-delegates both to Muse Code through `muse-code-acp`. The default remains
-`--agent codex`; saved scan
+delegates both to the local Kimi Code installation, `--agent muse` delegates
+both to Muse Code through `muse-code-acp`, and `--agent qwen` and `--agent
+mimo` delegate both to their respective local installations. The default
+remains `--agent codex`; saved scan
 recipes created before agent selection also replay with Codex.
 
 Use `--validation-prompt-file` to replace final validation with your own setup,
