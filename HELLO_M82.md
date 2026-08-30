@@ -1,0 +1,1 @@
+gzip proxy e2e ok
