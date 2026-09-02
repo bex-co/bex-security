@@ -256,6 +256,23 @@ agent:
 ./bex-security scan /path/to/repository --agent claude
 ```
 
+Bex keeps no model allowlist for `--agent claude`: it forwards `--model` and
+`--effort` to Claude Code over ACP and validates them against the models and
+reasoning levels your local installation advertises. Claude Code exposes its
+models as tier aliases rather than versioned ids — a current install offers
+`default`, `opus[1m]`, `fable`, `sonnet`, and `haiku`. Select one by alias; for
+example, `fable` resolves to your Claude Code's current Fable build (Fable 5.1):
+
+```bash
+./bex-security scan /path/to/repository --agent claude --model fable --effort high
+```
+
+To pin a specific version behind an alias, export the matching Claude Code
+variable (for example `ANTHROPIC_DEFAULT_FABLE_MODEL`) before scanning; the
+native `--agent claude` path forwards it to Claude Code unchanged. If Bex
+reports that a value is not offered, the local Claude Code does not advertise it
+yet — upgrade Claude Code rather than Bex.
+
 To run Claude Code with GLM through Z.AI, provide a Z.AI API key and select the
 Z.AI provider:
 
