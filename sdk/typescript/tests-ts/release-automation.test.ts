@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 import { bashCommand } from "./support/shell.js";
 
 type ReleaseMetadata = Record<string, unknown>;
@@ -156,7 +157,7 @@ const {
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
-const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
+const releaseTagTimeout = childProcessTimeout(10_000);
 
 const bash = bashCommand();
 const jqMock = [
@@ -523,7 +524,7 @@ describe("reviewed release note helpers", () => {
               GENERATED_NOTES: generatedNotes,
               TAGGED_NOTES: taggedNotes,
             },
-            timeout: 10_000,
+            timeout: childProcessTimeout(10_000),
           },
         );
 
@@ -1798,7 +1799,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_RELEASE_SUMMARY: summary,
           RELEASE_VERSION: "0.1.6",
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(status);
@@ -1911,7 +1912,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF: "refs/heads/main",
         GITHUB_SHA: releaseCommit,
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(1);
@@ -2011,7 +2012,7 @@ describe("GitHub release workflow safeguards", () => {
             MOCK_RELEASE_VERSION: currentVersion,
             RELEASE_SHA: releaseCommit,
           },
-          timeout: 10_000,
+          timeout: childProcessTimeout(10_000),
         });
 
         expect(result.stderr).toBe("");
@@ -2079,7 +2080,7 @@ describe("GitHub release workflow safeguards", () => {
         MOCK_RELEASE_SUMMARY: summary,
         RELEASE_SHA: releaseCommit,
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(1);
@@ -2172,7 +2173,7 @@ describe("GitHub release workflow safeguards", () => {
           }),
           MOCK_RELEASE_VERSION: version,
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(status);
@@ -2459,7 +2460,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_TAG_OBJECT: tagObject,
           MOCK_TAG_TYPE: tagType,
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(status);
@@ -2495,7 +2496,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF_TYPE: "tag",
         GITHUB_SHA: releaseCommit,
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(1);
@@ -2524,7 +2525,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF_TYPE: "tag",
         GITHUB_SHA: releaseCommit,
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(0);
@@ -2590,7 +2591,7 @@ describe("GitHub release workflow safeguards", () => {
         RELEASE_RUN_ID: releaseRun,
         RELEASE_TAG: "npm-v0.1.2",
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(0);
@@ -2675,7 +2676,7 @@ describe("GitHub release workflow safeguards", () => {
             INPUT_TAG: "npm-v0.1.2",
             MOCK_RUN_STATE: state,
           },
-          timeout: 10_000,
+          timeout: childProcessTimeout(10_000),
         });
 
         expect(result.status).toBe(0);
@@ -2717,7 +2718,7 @@ describe("GitHub release workflow safeguards", () => {
         INPUT_RUN_ID: releaseRun,
         INPUT_TAG: "npm-v0.1.2",
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(1);
@@ -2756,7 +2757,7 @@ describe("GitHub release workflow safeguards", () => {
         INPUT_RUN_ID: releaseRun,
         INPUT_TAG: "npm-v0.1.2",
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(1);
@@ -2797,7 +2798,7 @@ describe("GitHub release workflow safeguards", () => {
         INPUT_RUN_ID: releaseRun,
         INPUT_TAG: "npm-v0.1.2",
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(1);
@@ -2861,7 +2862,7 @@ describe("GitHub release workflow safeguards", () => {
           INPUT_TAG: "npm-v0.1.2",
           MOCK_TAG_TYPE: tagType,
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(0);
@@ -2902,7 +2903,7 @@ describe("GitHub release workflow safeguards", () => {
           INPUT_RUN_ID: runId,
           INPUT_TAG: "npm-v0.1.2",
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(1);
@@ -3054,7 +3055,7 @@ describe("GitHub release workflow safeguards", () => {
           RELEASE_TAG: "npm-v0.1.2",
           RELEASE_VERSION: "0.1.2",
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(status);
@@ -3224,7 +3225,7 @@ describe("GitHub release workflow safeguards", () => {
             RELEASE_TAG: "npm-v0.1.2",
             RELEASE_VERSION: "0.1.2",
           },
-          timeout: 10_000,
+          timeout: childProcessTimeout(10_000),
         });
 
         expect(result.status).toBe(status);
@@ -3753,7 +3754,7 @@ describe("GitHub release workflow safeguards", () => {
           RELEASE_TAG: "npm-v0.1.2",
           RELEASE_VERSION: "0.1.2",
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(status);
@@ -3859,7 +3860,7 @@ describe("GitHub release workflow safeguards", () => {
         ].join("\n"),
         encoding: "utf8",
         env: { ...process.env, RELEASE_VERSION: "0.1.2" },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(0);
@@ -4315,7 +4316,7 @@ describe("GitHub release workflow safeguards", () => {
         MOCK_PR_TITLE: title,
         PR_NUMBER: "17",
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(1);
@@ -4389,7 +4390,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_PR_TITLE: title,
           PR_NUMBER: "17",
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(0);
@@ -4461,7 +4462,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REPOSITORY: "test/codex-security",
         PR_NUMBER: "17",
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(0);
@@ -4525,7 +4526,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_PR_TITLE: title,
           PR_NUMBER: "17",
         },
-        timeout: 10_000,
+        timeout: childProcessTimeout(10_000),
       });
 
       expect(result.status).toBe(0);
@@ -4600,7 +4601,7 @@ describe("GitHub release workflow safeguards", () => {
         MOCK_PR_TITLE: title,
         PR_NUMBER: "17",
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(0);
@@ -4652,7 +4653,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REPOSITORY: "test/codex-security",
         PR_NUMBER: "17",
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
 
     expect(result.status).toBe(0);
@@ -4663,7 +4664,7 @@ describe("GitHub release workflow safeguards", () => {
     const result = spawnSync(
       "node",
       [fileURLToPath(automationScript), "unknown"],
-      { encoding: "utf8", timeout: 10_000 },
+      { encoding: "utf8", timeout: childProcessTimeout(10_000) },
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("published npm versions JSON from stdin");

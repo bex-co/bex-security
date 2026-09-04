@@ -4,6 +4,7 @@ import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 
 const testPosix = process.platform === "win32" ? test.skip : test;
 const publicEntrypoint = join(
@@ -81,7 +82,7 @@ async function runEntrypoint(
         PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
         ...overrides,
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -126,7 +127,7 @@ async function runVersionVerifier(
         GH_FIXTURE_RESPONSE: response,
         PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
       },
-      timeout: 10_000,
+      timeout: childProcessTimeout(10_000),
     });
   } finally {
     await rm(root, { recursive: true, force: true });

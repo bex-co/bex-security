@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 
 test("keeps model-visible attack-path tool names within the Codex limit", () => {
   const node = Bun.which("node");
@@ -20,7 +21,7 @@ test("keeps model-visible attack-path tool names within the Codex limit", () => 
         '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
         "",
       ].join("\n"),
-      timeout: 30_000,
+      timeout: childProcessTimeout(30_000),
     });
     expect(server.status, server.stderr).toBe(0);
 

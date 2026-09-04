@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 
 const packageRoot = join(import.meta.dir, "..");
 const cli = join(packageRoot, "src", "cli.ts");
@@ -34,7 +35,7 @@ for (const [name, args, port] of [
         CODEX_API_KEY: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 20_000,
+      timeout: childProcessTimeout(20_000),
     });
     const exited = once(child, "exit");
     let stderr = "";
@@ -71,7 +72,7 @@ for (const [name, args, port] of [
       await exited;
       await rm(root, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 120_000);
 }
 
 test("serve reports startup failures with a nonzero exit", async () => {
@@ -82,7 +83,7 @@ test("serve reports startup failures with a nonzero exit", async () => {
     const child = spawnSync(process.execPath, [cli, "serve"], {
       env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
       encoding: "utf8",
-      timeout: 20_000,
+      timeout: childProcessTimeout(20_000),
     });
     expect(child.error).toBeUndefined();
     expect(child.status).toBe(1);

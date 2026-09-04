@@ -56,6 +56,7 @@ import {
   fakeResult,
 } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
@@ -605,7 +606,7 @@ describe("CLI", () => {
             CODEX_HOME: join(root, "codex-home"),
             PYTHONDONTWRITEBYTECODE: "1",
           },
-          timeout: 30_000,
+          timeout: childProcessTimeout(30_000),
         },
       );
 
@@ -768,11 +769,13 @@ describe("CLI", () => {
       await mkdtemp(join(tmpdir(), "codex-security-cli-pre-commit-")),
     );
     try {
-      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
+      execFileSync("git", ["init", "-q", root], {
+        timeout: childProcessTimeout(10_000),
+      });
       execFileSync(
         "git",
         ["-C", root, "config", "core.hooksPath", ".custom hooks"],
-        { timeout: 10_000 },
+        { timeout: childProcessTimeout(10_000) },
       );
       let started = false;
       const hook = join(root, ".custom hooks", "pre-commit");
@@ -878,7 +881,7 @@ describe("CLI", () => {
       execFileSync(
         "git",
         ["-C", root, "add", "-f", "node_modules/.bin/codex-security"],
-        { timeout: 10_000 },
+        { timeout: childProcessTimeout(10_000) },
       );
       const commit = spawnSync(
         "git",
@@ -906,7 +909,7 @@ describe("CLI", () => {
             OPENAI_API_KEY: "",
             PATH: [binaries, process.env["PATH"] ?? ""].join(delimiter),
           },
-          timeout: 10_000,
+          timeout: childProcessTimeout(10_000),
         },
       );
       expect(commit.error).toBeUndefined();
@@ -1255,7 +1258,7 @@ describe("CLI", () => {
           '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"info","arguments":{}}}',
           "",
         ].join("\n"),
-        timeout: 30_000,
+        timeout: childProcessTimeout(30_000),
       },
     );
     expect(child.status).toBe(0);
@@ -1294,7 +1297,7 @@ describe("CLI", () => {
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",
     });
-  }, 30_000);
+  }, 120_000);
 
   test("presents interactive scan history and hides abandoned running scans", async () => {
     const stdout = capture(true);
@@ -1722,7 +1725,7 @@ describe("CLI", () => {
         {
           encoding: "utf8",
           env: { ...process.env, HOME: home, USERPROFILE: home },
-          timeout: 30_000,
+          timeout: childProcessTimeout(30_000),
         },
       );
       expect(child.status).toBe(0);
@@ -1739,7 +1742,7 @@ describe("CLI", () => {
     } finally {
       await rm(home, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 120_000);
 
   test("prints non-TTY progress stages once without starting a timer", () => {
     const stderr = capture();

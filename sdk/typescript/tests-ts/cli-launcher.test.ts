@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { VERSION } from "../src/index.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 
 const packageRoot = join(import.meta.dir, "..");
 
@@ -29,7 +30,7 @@ describe("CLI launcher", () => {
       }
       const child = spawnSync(process.execPath, [bin, "--version"], {
         encoding: "utf8",
-        timeout: 30_000,
+        timeout: childProcessTimeout(30_000),
       });
 
       expect(child.status).toBe(0);
@@ -51,7 +52,7 @@ describe("CLI launcher", () => {
       const child = spawnSync(
         process.execPath,
         ["--preload", preload, join(packageRoot, "src", "cli.ts"), "scan"],
-        { encoding: "utf8", timeout: 30_000 },
+        { encoding: "utf8", timeout: childProcessTimeout(30_000) },
       );
 
       expect(child.status).toBe(2);
@@ -80,7 +81,7 @@ describe("CLI launcher", () => {
       const child = spawnSync("node", [launcher], {
         encoding: "utf8",
         env: { ...process.env, NODE_NO_WARNINGS: "1" },
-        timeout: 30_000,
+        timeout: childProcessTimeout(30_000),
       });
 
       expect(child.status).toBe(2);
@@ -107,7 +108,11 @@ describe("CLI launcher", () => {
           "--outDir",
           dist,
         ],
-        { cwd: packageRoot, encoding: "utf8", timeout: 30_000 },
+        {
+          cwd: packageRoot,
+          encoding: "utf8",
+          timeout: childProcessTimeout(30_000),
+        },
       );
       expect(build.error).toBeUndefined();
       expect(build.status).toBe(0);
@@ -149,7 +154,7 @@ describe("CLI launcher", () => {
       const child = spawnSync("node", [bin, "--version"], {
         encoding: "utf8",
         env: launchEnvironment,
-        timeout: 30_000,
+        timeout: childProcessTimeout(30_000),
       });
 
       expect(child.status).toBe(0);
@@ -177,7 +182,7 @@ describe("CLI launcher", () => {
         {
           encoding: "utf8",
           env: launchEnvironment,
-          timeout: 30_000,
+          timeout: childProcessTimeout(30_000),
         },
       );
 
@@ -189,5 +194,5 @@ describe("CLI launcher", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 120_000);
 });

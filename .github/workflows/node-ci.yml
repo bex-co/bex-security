@@ -351,7 +351,9 @@ jobs:
     needs: validate-title
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
-    timeout-minutes: 20
+    # The packaged smoke install runs npm against the network on the slowest
+    # runner, so the job outlasts the ten-minute Windows command budget.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

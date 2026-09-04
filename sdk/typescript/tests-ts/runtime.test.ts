@@ -82,6 +82,7 @@ import {
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const temporaryDirectories: string[] = [];
@@ -185,7 +186,11 @@ async function inspectMcpServer(): Promise<McpServerResponse[]> {
   const execution = promisify(execFile)(
     "node",
     [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
-    { encoding: "utf8", timeout: 10_000, windowsHide: true },
+    {
+      encoding: "utf8",
+      timeout: childProcessTimeout(10_000),
+      windowsHide: true,
+    },
   );
   execution.child.stdin?.end(
     `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
@@ -2545,7 +2550,7 @@ describe("runtime directories and plugin Python boundary", () => {
         new URL("../src/runtime.ts", import.meta.url).href,
         join(root, "state"),
       ],
-      { timeout: 25_000, windowsHide: true },
+      { timeout: childProcessTimeout(25_000), windowsHide: true },
     );
   });
 
@@ -3832,7 +3837,7 @@ describe("runtime directories and plugin Python boundary", () => {
         {
           encoding: "utf8",
           env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
-          timeout: 20_000,
+          timeout: childProcessTimeout(20_000),
           windowsHide: true,
         },
       );

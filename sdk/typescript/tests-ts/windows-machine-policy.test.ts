@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 
 let temporaryRoot: string | undefined;
 afterEach(async () => {
@@ -155,7 +156,11 @@ describe("runtime directories and plugin Python boundary", () => {
             "--format=esm",
             `--outfile=${fixtureModule}`,
           ],
-          { encoding: "utf8", timeout: 30_000, windowsHide: true },
+          {
+            encoding: "utf8",
+            timeout: childProcessTimeout(30_000),
+            windowsHide: true,
+          },
         );
         expect(build.status).toBe(0);
         const selectedNode = spawnSync("node", ["-p", "process.execPath"], {
@@ -174,7 +179,7 @@ describe("runtime directories and plugin Python boundary", () => {
           {
             encoding: "utf8",
             env: constrainedEnvironment,
-            timeout: 30_000,
+            timeout: childProcessTimeout(30_000),
             windowsHide: true,
           },
         );

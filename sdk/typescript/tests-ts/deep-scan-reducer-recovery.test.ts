@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
+import { childProcessTimeout } from "./support/process-timeouts.js";
 
 function bundledFunction(runtime: string, name: string): string {
   const source = new RegExp(
@@ -75,7 +76,7 @@ test("keeps every advertised Deep worker tool within Codex's name limit", async 
           '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
           "",
         ].join("\n"),
-        timeout: 30_000,
+        timeout: childProcessTimeout(30_000),
       });
       expect(result.status, result.stderr).toBe(0);
       const response = result.stdout
