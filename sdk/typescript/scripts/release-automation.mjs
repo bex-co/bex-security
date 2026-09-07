@@ -26,6 +26,13 @@ function stableReleaseTagVersion(tag) {
   return version;
 }
 
+export function assertStableVersion(version) {
+  if (typeof version !== "string" || !stableVersion.test(version)) {
+    throw new Error("Release package must have a stable X.Y.Z version.");
+  }
+  return version;
+}
+
 export function releaseVersion(packageJson) {
   if (packageJson?.name === bexPackageName) {
     if (packageJson.bex?.upstreamPackage !== packageName) {
@@ -41,13 +48,7 @@ export function releaseVersion(packageJson) {
   if (packageJson?.name !== packageName) {
     throw new Error("Release package must be @openai/codex-security.");
   }
-  if (
-    typeof packageJson.version !== "string" ||
-    !stableVersion.test(packageJson.version)
-  ) {
-    throw new Error("Release package must have a stable X.Y.Z version.");
-  }
-  return packageJson.version;
+  return assertStableVersion(packageJson.version);
 }
 
 function hasReviewedText(value) {

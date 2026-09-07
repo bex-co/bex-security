@@ -399,7 +399,26 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)});
+      for (const name of ["CodexSecurity", "publishScan", "publishScanToCustom", "checkScanPublication", "deduplicateScan", "classifySeverity", "classifyScanSeverity", "classifyScanDirectorySeverity", "matchScanFindings"]) {
+        if (typeof sdk[name] !== "function") {
+          throw new Error("The installed package does not export " + name + ".");
+        }
+      }
+      const result = await sdk.matchScanFindings({ before: [], after: [] });
+      if (result.matches.length !== 0 || result.uncertain.length !== 0) {
+        throw new Error("Empty finding comparison did not return an empty result.");
+      }`,
+    ],
+    { cwd: consumer },
+  );
+
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `const sdk = await import(${JSON.stringify(`${packageManifest.name}/server`)}); for (const name of ["OpenAiFindingEmbedder", "SqliteFindingsStore", "startFindingsServer"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
     ],
     { cwd: consumer },
   );
@@ -673,10 +692,19 @@ try {
     { cwd: consumer },
   );
 
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "package-behavior.mjs"),
+      installedRoot,
+      consumer,
+    ],
+    { cwd: consumer },
+  );
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {

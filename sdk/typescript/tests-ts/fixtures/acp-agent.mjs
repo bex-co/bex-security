@@ -110,6 +110,13 @@ const app = agent({ name: "bex-security-test-agent" })
   })
   .onRequest(methods.agent.session.new, ({ params }) => {
     if (
+      process.env.BEX_TEST_EXPECT_CODEX_CONFIG &&
+      JSON.stringify(JSON.parse(process.env.CODEX_CONFIG)) !==
+        process.env.BEX_TEST_EXPECT_CODEX_CONFIG
+    ) {
+      throw new Error("unexpected Codex configuration");
+    }
+    if (
       process.env.BEX_TEST_EXPECT_CWD &&
       params.cwd !== process.env.BEX_TEST_EXPECT_CWD
     ) {

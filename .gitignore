@@ -1,4 +1,5 @@
 node_modules/
+/reports/
 dist/
 __pycache__/
 .pytest_cache/
@@ -13,6 +14,7 @@ __pycache__/
 /codex-security.json
 /findings.json
 /*.sarif
+.pnpm-store/
 
 # Never publish internal-only plugin data.
 .internal/

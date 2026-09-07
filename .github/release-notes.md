@@ -1,56 +1,74 @@
-<!-- release-version: 0.1.23 -->
+<!-- release-version: 0.1.25 -->
 
 ## Highlights
 
-- Store complete findings and embeddings in the preview findings service, with
-  paginated listing, repository-scoped candidate retrieval, and durable duplicate
-  groups. Publish a completed scan with
-  `publish scan --to custom --scan SCAN_ID --findings-url URL`, or preview the
-  payload with `--dry-run`. See the
-  [findings service](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#findings-service-preview)
-  and [custom publication](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#publishing-to-a-custom-findings-service).
-- Review potential duplicates from the CLI or SDK with
-  `dedupe --scan SCAN_ID --findings-url URL`. Reviews run on the calling host and save accepted groups
-  without replacing original findings. Searches default to the scan's repository;
-  `--all-repositories` explicitly broadens the scope. Add `--workflow-id` to scan,
-  custom publication, and deduplication to reuse completed stages and checkpointed
-  reviews after interruption. See
-  [deduplication](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#deduplication-from-the-sdk-and-cli)
-  and [workflow recovery](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#resuming-a-local-findings-workflow).
-- Browse stored findings and duplicate groups in the service's read-only
-  `/dashboard`, with search, repository filters, sorting, and record details.
-  The dashboard shows service-owned data, not local scan or workflow history.
-  See the [dashboard guide](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#read-only-dashboard).
-- Add a separate findings-service container release and a Compose runner for the
-  existing scanner CLI, with persistent state and source mounts. Both images
-  support Linux `amd64` and `arm64`. See
-  [container releases and the workflow runner](https://github.com/openai/codex-security/blob/npm-v0.1.23/docker/README.md).
-- Preserve sealed scan artifacts when optional follow-up instructions fail,
-  propagate caller cancellation during cloud publication, respect the exact
-  POSIX `PATH` when resolving trusted executables, and retain nested attack-path
-  evidence strings in saved finding previews.
+- Preserve confirmed finding identities across scans and comparisons, and show
+  related findings with their reasons while keeping distinct findings separate.
+  Large comparisons now use bounded batches without truncating finding text;
+  inputs that cannot fit leave matching explicitly incomplete.
+- Improve deduplication with separate screening and pair reviews, validated
+  pair assignments, and groups that respect explicit `DISTINCT` decisions.
+  Invalid submissions receive one corrective turn; blocked reviews fail without
+  recording a verdict. `DeduplicationReviewError` exposes structured, sanitized
+  failure details. The SDK also adds `deduplicateScanDirectory` for complete,
+  sealed scans outside local history.
+- Generate synthetic Standard scan results with `scan --mock` or the SDK's
+  `mock: true`, without authentication or model calls. Mock results support
+  normal reports, exports, history, and reruns. See
+  [mock scans](https://github.com/openai/codex-security/blob/npm-v0.1.25/sdk/typescript/README.md#generate-mock-scan-results).
+- Increase a running scan's total budget from the interactive dashboard when
+  usage reaches 80% of its limit, or use the SDK's `onBudgetApproaching`
+  callback. The existing limit remains enforced until an increase is saved.
+  See [scan cost limits](https://github.com/openai/codex-security/blob/npm-v0.1.25/sdk/typescript/README.md#progress-and-cost).
+- Recognize existing Codex authentication in CLI and SDK login status. SDK
+  scans, comparisons, and deduplication reviews now honor native command-auth
+  providers, including renewable tokens.
+- Configure the findings service's full embeddings endpoint with
+  `CODEX_SECURITY_EMBEDDINGS_URL`. The new `@openai/codex-security/server`
+  exports support embedding credentials supplied by a callback before each
+  HTTP batch. See
+  [embeddings and storage](https://github.com/openai/codex-security/blob/npm-v0.1.25/sdk/typescript/README.md#embeddings-and-storage).
+- Include PowerShell module (`.psm1`) and data (`.psd1`) files in scan
+  inventories, and recognize BOM-marked UTF-16 source files as text.
+- Preserve scoped scan and component-plan inventories after directory renames
+  that change only letter casing on case-insensitive filesystems.
+- Support long Codex executable paths on Windows, including nested Deep Scan
+  workers, and retry credential snapshots for another `Get-Acl` path-not-found
+  race when a descendant disappears during inspection.
+- Honor case-insensitive Windows environment variable names during finding
+  deduplication, so configured API credentials and private configuration paths
+  are used consistently.
+- Stream tracked binary diffs when hashing repository snapshots, reducing
+  memory use while preserving the existing digest format.
+- Include complete OCI metadata in container image labels and multiarchitecture
+  annotations, with documentation pinned to the source commit and image
+  verification commands in the release workflow summary. See
+  [container metadata and verification](https://github.com/openai/codex-security/blob/npm-v0.1.25/docker/README.md#image-metadata-and-verification).
 
 ## Upgrade notes
 
-- The findings API and dashboard have no built-in authentication. Keep the
-  service on a trusted local endpoint or behind an authenticated TLS proxy;
-  Compose publishes only to host loopback. Nonempty imports send complete finding
-  JSON to the OpenAI embeddings API and require an API key. A ChatGPT login is not
-  an embedding credential. Duplicate review uses the calling host's Codex
-  credentials separately, and embedding and review calls can incur usage charges.
-- Stop the findings service and back up its entire state directory before
-  upgrading. Startup applies SQLite migrations automatically; rollback requires
-  the pre-upgrade backup and previous image. Existing findings are not
-  automatically embedded: import them with their repository ID before using
-  repository-scoped deduplication. Keep runner state separate from service state.
-  See [backups and upgrades](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/README.md#upgrades-and-backups).
-- Container publication is separate from npm publication. Use a version or digest
-  only after the selected image release is available; source builds remain
-  supported. Follow the [container setup](https://github.com/openai/codex-security/blob/npm-v0.1.23/docker/README.md#ghcr-administrator-setup)
-  before the first registry release.
-- Source checkouts now generate the SDK's bundled plugin from
-  `plugins/codex-security`. Contributors should edit the canonical plugin source
-  and run `pnpm run build:plugin`; the published npm package still includes the
-  runtime payload. See [plugin source ownership](https://github.com/openai/codex-security/blob/npm-v0.1.23/sdk/typescript/TESTING.md).
+- Mock mode is opt-in and saves clearly marked synthetic findings in local
+  history; use a separate `CODEX_SECURITY_STATE_DIR` for disposable test data.
+  It supports Standard scans only and does not audit the repository.
+- Interactive budget increases are unavailable in CI, JSON/JSONL, headless,
+  and verbose modes. Existing cost limits continue to apply in those modes.
+- The embeddings URL defaults to the existing OpenAI endpoint. A configured
+  endpoint receives finding inputs and the bearer credential and must support
+  the OpenAI embeddings format. Embeddings credentials remain separate from
+  Codex ChatGPT sign-in.
+- Local history applies an automatic database index migration. Completed scan
+  artifacts remain unchanged.
+- Source builds now use repository-pinned pnpm 11.19.0, including MCP app
+  dependencies, whose configuration requires a seven-day minimum release age.
+  From the repository root, run
+  `pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile`.
+  See
+  [running without Docker](https://github.com/openai/codex-security/blob/npm-v0.1.25/sdk/typescript/README.md#running-without-docker).
+- Container publication remains separate from npm publication. Existing stable
+  container tags are not updated in place.
+
+Build and CI updates also improve package verification, portable Python checks,
+Windows fixtures, and test scheduling. Documentation clarifies portable
+environment-variable guidance and safe examples.
 
 The categorized list below contains the individual changes.

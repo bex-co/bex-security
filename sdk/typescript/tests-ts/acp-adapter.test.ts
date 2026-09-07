@@ -32,6 +32,35 @@ function completedMessage(events: ThreadEvent[]): string | undefined {
 }
 
 describe("ACP adapter", () => {
+  test("forwards native command authentication overrides to Codex ACP", async () => {
+    const config = {
+      model_provider: "synthetic",
+      model_providers: {
+        synthetic: {
+          name: "Synthetic provider",
+          base_url: "https://example.invalid/v1",
+          auth: { command: "synthetic-auth", args: ["token"] },
+        },
+      },
+    };
+    const thread = new AcpCodex(
+      {
+        env: {
+          ...process.env,
+          BEX_TEST_EXPECT_CODEX_CONFIG: JSON.stringify(config),
+        },
+        config: { model_provider: "synthetic" },
+        configOverrides: [
+          'model_providers={synthetic={name="Synthetic provider",base_url="https://example.invalid/v1",auth={command="synthetic-auth",args=["token"]}}}',
+        ],
+      },
+      AGENT_PATH,
+    ).startThread({ workingDirectory: process.cwd() });
+    expect((await thread.run("scan the repository")).finalResponse).toBe(
+      "new:reject",
+    );
+  });
+
   test("negotiates namespaced agent capabilities", async () => {
     const capabilities = await new AcpAgentClient(
       { env: { ...process.env, BEX_TEST_AGENT: "muse" } },

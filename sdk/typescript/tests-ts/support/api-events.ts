@@ -82,8 +82,10 @@ export function createApiTestFixtures() {
   };
 }
 
-export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
-  yield { type: "thread.started", thread_id: "thread-1" };
+export async function* completedEvents(
+  threadId = "thread-1",
+): AsyncGenerator<ThreadEvent> {
+  yield { type: "thread.started", thread_id: threadId };
   yield { type: "turn.started" };
   yield {
     type: "item.completed",

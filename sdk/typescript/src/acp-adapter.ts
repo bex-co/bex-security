@@ -26,7 +26,10 @@ import type {
   ThreadOptions,
   TurnOptions,
 } from "@openai/codex-sdk";
+import { parse } from "smol-toml";
 import {
+  deepMerge,
+  type JsonObject,
   kimiReasoningEffort,
   type AcpAgentName,
   type ScanModelConfiguration,
@@ -884,7 +887,10 @@ const CODEX_DRIVER: AcpAgentDriver = {
   launch: (require, override) =>
     nodeLaunch(override ?? require.resolve("@agentclientprotocol/codex-acp")),
   environment(options, threadOptions) {
-    const config = options.config ?? {};
+    const config = (options.configOverrides ?? []).reduce<JsonObject>(
+      (config, override) => deepMerge(config, parse(override) as JsonObject),
+      (options.config ?? {}) as JsonObject,
+    );
     const modelProvider = config["model_provider"];
     return {
       ...options.env,
