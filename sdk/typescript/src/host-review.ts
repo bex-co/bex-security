@@ -5,7 +5,11 @@ import { promisify } from "node:util";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { z } from "incur";
 import { inventoryFiles } from "./component-plan.js";
-import { IncompleteScanError } from "./errors.js";
+import {
+  AuthenticationRequiredError,
+  ConfigurationError,
+  IncompleteScanError,
+} from "./errors.js";
 import { pathIsWithin } from "./path-scope.js";
 import {
   scanActivitiesFromEvent,
@@ -27,6 +31,7 @@ interface ScanEvent {
 }
 
 interface HostReviewThread {
+  close?(): Promise<void>;
   runStreamed(
     input: string,
     options: TurnOptions,
@@ -160,24 +165,53 @@ async function runAssignmentRound(
   const results: AssignmentResult[] = [];
   let next = 0;
   const concurrency = Math.min(Math.max(1, options.workers), batches.length);
-  await Promise.all(
+  let failed = false;
+  const settled = await Promise.allSettled(
     Array.from({ length: concurrency }, async () => {
       for (;;) {
         options.signal.throwIfAborted();
+        if (failed) return;
         const index = next++;
         const files = batches[index];
         if (files === undefined) return;
-        results[index] = await runAssignment(
-          options,
-          root,
-          firstAssignment + index,
-          files,
-          accepted,
-        );
+        try {
+          results[index] = await runAssignment(
+            options,
+            root,
+            firstAssignment + index,
+            files,
+            accepted,
+          );
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
       }
     }),
   );
+  const rejected = settled.find((result) => result.status === "rejected");
+  if (rejected?.status === "rejected") throw rejected.reason;
   return results;
+}
+
+function reviewFailureDisposition(
+  error: unknown,
+): "stop" | "startup" | "recover" {
+  for (let cause = error; cause instanceof Error; cause = cause.cause) {
+    if (
+      cause instanceof ConfigurationError ||
+      cause instanceof AuthenticationRequiredError ||
+      (cause as Error & { code?: string }).code === "ENOENT"
+    )
+      return "stop";
+    const data = (cause as Error & { data?: unknown }).data;
+    const failure = isRecord(data) ? data["failure"] : undefined;
+    if (isRecord(failure)) {
+      if (failure["execution"] === "possiblySubmitted") return "stop";
+      if (failure["execution"] === "notSubmitted") return "startup";
+    }
+  }
+  return "recover";
 }
 
 async function runAssignment(
@@ -206,6 +240,7 @@ async function runAssignment(
     });
     const missing = files.filter((path) => !evidence.has(path));
     const prompt = assignmentPrompt(options.repository, missing);
+    let attemptFailed = false;
     try {
       const { events } = await thread.runStreamed(prompt, {
         signal: options.signal,
@@ -300,8 +335,21 @@ async function runAssignment(
         lastFailure: null,
       };
     } catch (error) {
+      attemptFailed = true;
       options.signal.throwIfAborted();
+      const disposition = reviewFailureDisposition(error);
+      if (
+        disposition === "stop" ||
+        (disposition === "startup" && attempt === ASSIGNMENT_ATTEMPTS)
+      )
+        throw error;
       lastFailure = error instanceof Error ? error.message : String(error);
+    } finally {
+      try {
+        await thread.close?.();
+      } catch (error) {
+        if (!attemptFailed) throw error;
+      }
     }
   }
   const reviewedFiles = files.filter(

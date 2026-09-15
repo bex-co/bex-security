@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { ConfigurationError } from "../src/errors.js";
 import {
   runHostReviewAssignments,
   type HostReviewClient,
@@ -327,4 +328,60 @@ describe("host ACP review assignments", () => {
       await rm(value.root, { recursive: true, force: true });
     }
   });
+});
+
+describe("host review failure handling", () => {
+  for (const [execution, expectedAttempts] of [
+    ["configuration", 1],
+    ["notSubmitted", 2],
+    ["possiblySubmitted", 1],
+  ] as const) {
+    test(`does not fan out ${execution} failures into smaller batches`, async () => {
+      const value = await fixture();
+      let starts = 0;
+      let closes = 0;
+      const cause =
+        execution === "configuration"
+          ? new ConfigurationError("unavailable synthetic model")
+          : Object.assign(new Error("synthetic host failure"), {
+              data: { failure: { execution, phase: "initializing" } },
+            });
+      const original = new Error("host diagnostics", { cause });
+      const client: HostReviewClient = {
+        startThread() {
+          starts++;
+          return {
+            async close() {
+              closes++;
+              throw new Error(
+                "synthetic cleanup failure must not replace the initiating failure",
+              );
+            },
+            async runStreamed() {
+              throw original;
+            },
+          };
+        },
+      };
+      try {
+        await expect(
+          runHostReviewAssignments({
+            client,
+            repository: value.repository,
+            scanDirectory: value.scanDirectory,
+            target: { kind: "repository", paths: [] },
+            pluginRoot: value.root,
+            python: process.execPath,
+            expectedFilesTotal: 2,
+            workers: 2,
+            signal: new AbortController().signal,
+          }),
+        ).rejects.toBe(original);
+        expect(starts).toBe(expectedAttempts);
+        expect(closes).toBe(expectedAttempts);
+      } finally {
+        await rm(value.root, { recursive: true, force: true });
+      }
+    });
+  }
 });

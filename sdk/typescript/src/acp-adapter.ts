@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
@@ -9,6 +10,8 @@ import {
   methods,
   ndJsonStream,
   type InitializeResponse,
+  type ClientConnection,
+  type ClientContext,
   type McpServer,
   type NewSessionResponse,
   type PromptResponse,
@@ -34,6 +37,7 @@ import {
   type AcpAgentName,
   type ScanModelConfiguration,
 } from "./config.js";
+import { AuthenticationRequiredError, ConfigurationError } from "./errors.js";
 import { VERSION } from "./version.js";
 
 export interface AcpAgentSelection {
@@ -115,6 +119,7 @@ export class AcpAgentClient {
   private readonly options: CodexOptions;
   private readonly selection: AcpAgentSelection;
   private readonly agentPath: string | undefined;
+  readonly #threads = new Set<AcpAgentThread>();
 
   public constructor(
     options: CodexOptions = {},
@@ -127,12 +132,23 @@ export class AcpAgentClient {
   }
 
   public startThread(options: ThreadOptions = {}): AcpAgentThread {
-    return new AcpAgentThread(
+    const thread = new AcpAgentThread(
       this.options,
       options,
       this.selection,
       this.agentPath,
+      {
+        opened: () => this.#threads.add(thread),
+        closed: () => this.#threads.delete(thread),
+      },
     );
+    return thread;
+  }
+
+  public async close(): Promise<void> {
+    const threads = [...this.#threads];
+    this.#threads.clear();
+    await Promise.all(threads.map((thread) => thread.close()));
   }
 
   /** Negotiate agent-level capabilities before choosing scan orchestration. */
@@ -160,6 +176,18 @@ export class AcpAgentThread {
   readonly #selection: AcpAgentSelection;
   readonly #driver: AcpAgentDriver;
   readonly #agentPath: string | undefined;
+  #connection: {
+    connection: ClientConnection;
+    child: ChildProcessWithoutNullStreams;
+    stderr: { value(): string };
+    failed: Promise<never>;
+  } | null = null;
+  #active: {
+    controller: AbortController;
+    queue: EventQueue;
+    adapter: AcpEventAdapter;
+    acceptUpdates: boolean;
+  } | null = null;
   #id: string | null = null;
   #configuration: SessionConfiguration = {};
   #modelConfiguration: ScanModelConfiguration | null = null;
@@ -169,6 +197,7 @@ export class AcpAgentThread {
     threadOptions: ThreadOptions,
     selection: AcpAgentSelection,
     agentPath?: string,
+    private readonly lifecycle?: { opened(): void; closed(): void },
   ) {
     this.#codexOptions = codexOptions;
     this.#threadOptions = threadOptions;
@@ -261,134 +290,62 @@ export class AcpAgentThread {
     return { items, finalResponse, usage };
   }
 
+  public async close(): Promise<void> {
+    this.#active?.controller.abort();
+    try {
+      await this.#disposeConnection();
+    } finally {
+      this.lifecycle?.closed();
+    }
+  }
+
+  async #disposeConnection(): Promise<void> {
+    const handle = this.#connection;
+    this.#connection = null;
+    if (handle === null) return;
+    handle.connection.close();
+    await stopChild(handle.child);
+  }
+
   async *#events(
     input: string,
     options: TurnOptions,
   ): AsyncGenerator<ThreadEvent> {
-    const queue = createEventQueue();
-    const adapter = new AcpEventAdapter();
-    const child = this.#spawnAgent();
-    const childFailed = childProcessFailure(child, this.#driver.name);
-    const mcpServers = await this.#driver.mcpServers(this.#codexOptions);
-    let context:
-      | {
-          notify(
-            method: typeof methods.agent.session.cancel,
-            params: { sessionId: string },
-          ): Promise<void>;
-        }
-      | undefined;
-    let sessionId: string | null = this.#id;
-    let acceptUpdates = false;
-    const signal = options.signal;
+    if (this.#active !== null)
+      throw new Error("An ACP thread already has an active turn.");
+    const active = {
+      controller: new AbortController(),
+      queue: createEventQueue(),
+      adapter: new AcpEventAdapter(),
+      acceptUpdates: false,
+    };
+    this.#active = active;
+    this.lifecycle?.opened();
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, active.controller.signal])
+      : active.controller.signal;
+    let completed = false;
     const cancel = () => {
-      if (context !== undefined && sessionId !== null) {
-        void context.notify(methods.agent.session.cancel, { sessionId });
+      if (this.#connection && this.#id) {
+        void this.#connection.connection.agent
+          .notify(methods.agent.session.cancel, { sessionId: this.#id })
+          .catch(() => {});
       }
     };
     signal?.addEventListener("abort", cancel, { once: true });
-
-    const stderr = collectStream(child.stderr);
-    const stream = ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
-    );
-    const connected = client({ name: "bex-security" })
-      .onRequest(methods.client.session.requestPermission, ({ params }) =>
-        this.#driver.permissionResponse(params),
-      )
-      .onNotification(methods.client.session.update, ({ params }) => {
-        if (!acceptUpdates || params.sessionId !== sessionId) return;
-        for (const event of adapter.update(params.update)) queue.push(event);
-      })
-      .connectWith(stream, async (agent) => {
-        context = agent;
-        const initialization = await agent.request(methods.agent.initialize, {
-          protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: {
-            session: { configOptions: { boolean: {} } },
-          },
-          clientInfo: {
-            name: "bex-security",
-            title: "Bex Security",
-            version: VERSION,
-          },
-        });
-        requireCompatibleProtocol(initialization, this.#driver.name);
-        const additionalDirectories = this.#driver.additionalDirectories(
-          this.#codexOptions,
-          this.#threadOptions,
-        );
-        if (
-          additionalDirectories.length > 0 &&
-          initialization.agentCapabilities?.sessionCapabilities
-            ?.additionalDirectories === undefined
-        ) {
-          throw new Error(
-            `${this.#driver.name} ACP does not support the additional directories required by this scan.`,
-          );
-        }
-        const sessionMeta = this.#driver.sessionMeta(
-          this.#codexOptions,
-          this.#threadOptions,
-        );
-        const sessionRequest = {
-          cwd: this.#threadOptions.workingDirectory ?? process.cwd(),
-          ...(additionalDirectories.length === 0
-            ? {}
-            : { additionalDirectories }),
-          mcpServers,
-          ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }),
-        };
-        let sessionConfiguration: SessionConfiguration;
-        if (sessionId === null) {
-          const response = await agent.request(
-            methods.agent.session.new,
-            sessionRequest,
-          );
-          sessionId = response.sessionId;
-          this.#id = sessionId;
-          sessionConfiguration = response;
-        } else if (
-          initialization.agentCapabilities?.sessionCapabilities?.resume !==
-          undefined
-        ) {
-          sessionConfiguration = await agent.request(
-            methods.agent.session.resume,
-            { ...sessionRequest, sessionId },
-          );
-        } else if (initialization.agentCapabilities?.loadSession === true) {
-          sessionConfiguration = await agent.request(
-            methods.agent.session.load,
-            { ...sessionRequest, sessionId },
-          );
-        } else {
-          throw new Error(
-            `${this.#driver.name} ACP does not support reconnecting to an existing session.`,
-          );
-        }
-        sessionConfiguration = {
-          modes: sessionConfiguration.modes ?? this.#configuration.modes,
-          configOptions:
-            sessionConfiguration.configOptions ??
-            this.#configuration.configOptions,
-        };
-        this.#modelConfiguration = await configureSession(
-          agent,
-          sessionId,
-          this.#threadOptions,
-          this.#driver.name,
-          this.#selection,
-          sessionConfiguration,
-        );
-        this.#configuration = sessionConfiguration;
-        queue.push({ type: "thread.started", thread_id: sessionId });
-        acceptUpdates = true;
-        queue.push({ type: "turn.started" });
-        const response = await agent.request(
+    const operation = async () => {
+      signal?.throwIfAborted();
+      await this.#open(signal);
+      signal?.throwIfAborted();
+      const handle = this.#connection!;
+      active.queue.push({ type: "thread.started", thread_id: this.#id! });
+      active.acceptUpdates = true;
+      active.queue.push({ type: "turn.started" });
+      const response = await Promise.race([
+        handle.connection.agent.request(
           methods.agent.session.prompt,
           {
-            sessionId,
+            sessionId: this.#id!,
             prompt: [
               {
                 type: "text",
@@ -397,14 +354,15 @@ export class AcpAgentThread {
             ],
           },
           signal === undefined ? undefined : { cancellationSignal: signal },
-        );
-        for (const event of adapter.complete(response)) queue.push(event);
-      });
-    const operation = Promise.race([connected, childFailed]);
-
-    void operation.then(queue.close, (error: unknown) => {
-      const details = stderr.value().trim();
-      queue.fail(
+        ),
+        handle.failed,
+      ]);
+      for (const event of active.adapter.complete(response))
+        active.queue.push(event);
+    };
+    void operation().then(active.queue.close, (error) => {
+      const details = this.#connection?.stderr.value().trim() ?? "";
+      active.queue.fail(
         acpAgentFailure(
           details === ""
             ? error
@@ -413,17 +371,171 @@ export class AcpAgentThread {
         ),
       );
     });
-
     try {
       for (;;) {
-        const result = await queue.next();
-        if (result.done) return;
+        const result = await active.queue.next();
+        if (result.done) {
+          completed = true;
+          return;
+        }
         yield result.value;
       }
     } finally {
       signal?.removeEventListener("abort", cancel);
-      await stopChild(child);
+      active.acceptUpdates = false;
+      // Interrupted streams cannot leave work running behind the consumer.
+      try {
+        if (!completed || signal.aborted || this.#driver.name !== "muse")
+          await this.close();
+      } finally {
+        this.#active = null;
+      }
     }
+  }
+
+  async #open(signal?: AbortSignal): Promise<void> {
+    if (this.#connection && !this.#connection.connection.signal.aborted) return;
+    await this.#disposeConnection();
+    const mcpServers = await this.#driver.mcpServers(this.#codexOptions);
+    signal?.throwIfAborted();
+    const child = this.#spawnAgent();
+    const failed = childProcessFailure(child, this.#driver.name);
+    void failed.catch(() => {});
+    const stderr = collectStream(child.stderr);
+    const stream = ndJsonStream(
+      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+      Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
+    );
+    const connection = client({ name: "bex-security" })
+      .onRequest(methods.client.session.requestPermission, ({ params }) =>
+        this.#driver.permissionResponse(params),
+      )
+      .onNotification(methods.client.session.update, ({ params }) => {
+        if (params.sessionId !== this.#id) return;
+        if (params.update.sessionUpdate === "config_option_update") {
+          this.#configuration.configOptions = params.update.configOptions;
+          const model = selectedConfigValue(
+            params.update.configOptions,
+            "model",
+          );
+          const effort = selectedConfigValue(
+            params.update.configOptions,
+            "thought_level",
+          );
+          if (model !== null && effort !== null)
+            this.#modelConfiguration = {
+              model:
+                this.#selection.resolvedModel ?? this.#selection.model ?? model,
+              reasoningEffort: effort,
+            };
+        }
+        const active = this.#active;
+        if (active?.acceptUpdates) {
+          for (const event of active.adapter.update(params.update))
+            active.queue.push(event);
+        }
+      })
+      .connect(stream);
+    this.#connection = { connection, child, failed, stderr };
+    const abort = () => connection.close(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      signal?.throwIfAborted();
+      await Promise.race([
+        this.#initialize(connection.agent, mcpServers),
+        failed,
+      ]);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  async #initialize(
+    agent: ClientContext,
+    mcpServers: McpServer[],
+  ): Promise<void> {
+    let sessionId = this.#id;
+    const initialization = await agent.request(methods.agent.initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {
+        session: { configOptions: { boolean: {} } },
+      },
+      clientInfo: {
+        name: "bex-security",
+        title: "Bex Security",
+        version: VERSION,
+      },
+    });
+    requireCompatibleProtocol(initialization, this.#driver.name);
+    const additionalDirectories = this.#driver.additionalDirectories(
+      this.#codexOptions,
+      this.#threadOptions,
+    );
+    if (
+      additionalDirectories.length > 0 &&
+      initialization.agentCapabilities?.sessionCapabilities
+        ?.additionalDirectories === undefined
+    ) {
+      throw new ConfigurationError(
+        `${this.#driver.name} ACP does not support the additional directories required by this scan.`,
+      );
+    }
+    const sessionMeta = this.#driver.sessionMeta(
+      this.#codexOptions,
+      this.#threadOptions,
+    );
+    const sessionRequest = {
+      cwd: this.#threadOptions.workingDirectory ?? process.cwd(),
+      ...(additionalDirectories.length === 0 ? {} : { additionalDirectories }),
+      mcpServers,
+      ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }),
+    };
+    let sessionConfiguration: SessionConfiguration;
+    if (sessionId === null) {
+      const response = await agent.request(
+        methods.agent.session.new,
+        sessionRequest,
+      );
+      sessionId = response.sessionId;
+      this.#id = sessionId;
+      sessionConfiguration = response;
+    } else if (
+      initialization.agentCapabilities?.sessionCapabilities?.resume !==
+      undefined
+    ) {
+      sessionConfiguration = await agent.request(methods.agent.session.resume, {
+        ...sessionRequest,
+        sessionId,
+      });
+    } else if (initialization.agentCapabilities?.loadSession === true) {
+      sessionConfiguration = await agent.request(methods.agent.session.load, {
+        ...sessionRequest,
+        sessionId,
+      });
+    } else {
+      throw new ConfigurationError(
+        `${this.#driver.name} ACP does not support reconnecting to an existing session.`,
+      );
+    }
+    sessionConfiguration = {
+      modes: sessionConfiguration.modes ?? this.#configuration.modes,
+      configOptions:
+        sessionConfiguration.configOptions ?? this.#configuration.configOptions,
+    };
+    this.#configuration = sessionConfiguration;
+    this.#modelConfiguration = await configureSession(
+      agent,
+      sessionId,
+      this.#threadOptions,
+      this.#driver.name,
+      this.#selection,
+      sessionConfiguration,
+    ).catch((error: unknown) => {
+      if (record(error)?.["code"] === -32602) {
+        throw new ConfigurationError(errorMessage(error), { cause: error });
+      }
+      throw error;
+    });
   }
 
   #spawnAgent(): ChildProcessWithoutNullStreams {
@@ -461,9 +573,12 @@ function acpAgentFailure(error: unknown, agent: AcpAgentName): unknown {
       message,
     )
   ) {
-    return new Error(`${message}\n${setup.authenticate}`, {
-      cause: error,
-    });
+    return new AuthenticationRequiredError(
+      `${message}\n${setup.authenticate}`,
+      {
+        cause: error,
+      },
+    );
   }
   return error;
 }
@@ -677,7 +792,19 @@ async function configureSession(
   if (agentName === "mimo") {
     return await configureMimoModel(agent, sessionId, configOptions, selection);
   }
-  if (selection.model !== undefined) {
+  if (selection.model !== undefined && agentName === "muse") {
+    // Muse accepts manual IDs before its deferred catalog is available and
+    // resolves provider-qualified choices itself. A menu is not an allowlist.
+    const response = await agent.request(
+      methods.agent.session.setConfigOption,
+      {
+        sessionId,
+        configId: "model",
+        value: selection.model,
+      },
+    );
+    configOptions = (response as SetSessionConfigOptionResponse).configOptions;
+  } else if (selection.model !== undefined) {
     configOptions = (
       await setConfigOption(
         agent,
@@ -782,7 +909,9 @@ function configChoices(
 ) {
   const option = options.find((candidate) => candidate.category === category);
   if (option === undefined || option.type !== "select") {
-    throw new Error(`ACP agent does not offer a ${category} configuration.`);
+    throw new ConfigurationError(
+      `ACP agent does not offer a ${category} configuration.`,
+    );
   }
   return option.options.flatMap((candidate) =>
     "value" in candidate ? [candidate] : candidate.options,
@@ -801,7 +930,7 @@ function selectedConfigChoice(
       candidate.name.toLowerCase() === requested.toLowerCase(),
   );
   if (selected === undefined) {
-    throw new Error(
+    throw new ConfigurationError(
       `ACP agent does not offer ${category} value ${JSON.stringify(requested)}. Available values: ${choices.map(({ value }) => value).join(", ")}.`,
     );
   }
@@ -823,7 +952,9 @@ async function setConfigOption(
 ): Promise<SetConfigOptionResult> {
   const option = options.find((candidate) => candidate.category === category);
   if (option === undefined || option.type !== "select") {
-    throw new Error(`ACP agent does not offer a ${category} configuration.`);
+    throw new ConfigurationError(
+      `ACP agent does not offer a ${category} configuration.`,
+    );
   }
   const selected = selectedConfigChoice(options, category, requested);
   if (selected === option.currentValue) {
@@ -1031,6 +1162,22 @@ const KIMI_DRIVER: AcpAgentDriver = {
   },
 };
 
+/** Keep native history scan-local while preserving authentication and explicit data paths. */
+export function museEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result = withoutCodexProviderCredentials(env);
+  const state = env["CODEX_SECURITY_STATE_DIR"];
+  const scan = env["CODEX_SECURITY_SCAN_ID"];
+  if (!env["XDG_DATA_HOME"] && state && scan) {
+    result["XDG_DATA_HOME"] = join(
+      state,
+      "agent-data",
+      "muse",
+      `scan-${encodeURIComponent(scan)}`,
+    );
+  }
+  return result;
+}
+
 const MUSE_DRIVER: AcpAgentDriver = {
   name: "muse",
   launch: (require, override) =>
@@ -1038,7 +1185,14 @@ const MUSE_DRIVER: AcpAgentDriver = {
       override ?? require.resolve("@bex-co/muse-code-acp/dist/index.js"),
     ),
   environment(options) {
-    return withoutCodexProviderCredentials(options.env ?? {});
+    const env = museEnvironment(options.env ?? {});
+    if (
+      env["XDG_DATA_HOME"] !== options.env?.["XDG_DATA_HOME"] &&
+      env["XDG_DATA_HOME"]
+    ) {
+      mkdirSync(env["XDG_DATA_HOME"], { recursive: true, mode: 0o700 });
+    }
+    return env;
   },
   async mcpServers(options) {
     return (await pluginMcpServers(options)).map((server) =>

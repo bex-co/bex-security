@@ -1,13 +1,20 @@
 #!/usr/bin/env node
+import { appendFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import {
   PROTOCOL_VERSION,
+  RequestError,
   agent,
   methods,
   ndJsonStream,
 } from "@agentclientprotocol/sdk";
 
 let resumed = false;
+process.on("exit", () => trace("exit"));
+const trace = (method) => {
+  if (process.env.BEX_TEST_TRACE)
+    appendFileSync(process.env.BEX_TEST_TRACE, method + "\n");
+};
 
 let configOptions = [
   {
@@ -86,6 +93,7 @@ if (process.env.BEX_TEST_AGENT === "mimo") {
 
 const app = agent({ name: "bex-security-test-agent" })
   .onRequest(methods.agent.initialize, () => {
+    trace("initialize");
     if (process.env.BEX_TEST_AUTH_ERROR) {
       process.stderr.write("authentication required\n");
       throw new Error("authentication required");
@@ -109,6 +117,17 @@ const app = agent({ name: "bex-security-test-agent" })
     };
   })
   .onRequest(methods.agent.session.new, ({ params }) => {
+    if (process.env.BEX_TEST_MUSE_LAZY_MODELS) {
+      configOptions = configOptions.map((option) =>
+        option.category === "model"
+          ? {
+              ...option,
+              currentValue: "default",
+              options: [{ value: "default", name: "Default" }],
+            }
+          : option,
+      );
+    }
     if (
       process.env.BEX_TEST_EXPECT_CODEX_CONFIG &&
       JSON.stringify(JSON.parse(process.env.CODEX_CONFIG)) !==
@@ -134,7 +153,24 @@ const app = agent({ name: "bex-security-test-agent" })
     };
   })
   .onRequest(methods.agent.session.resume, () => {
+    trace("resume");
     resumed = true;
+    if (process.env.BEX_TEST_MUSE_LAZY_MODELS) {
+      configOptions = configOptions.map((option) =>
+        option.category === "model"
+          ? {
+              ...option,
+              currentValue: "muse-model:synthetic",
+              options: [
+                {
+                  value: "muse-model:synthetic",
+                  name: "alternate (synthetic)",
+                },
+              ],
+            }
+          : option,
+      );
+    }
     return { configOptions };
   })
   .onRequest(methods.agent.session.setMode, ({ params }) => {
@@ -147,8 +183,21 @@ const app = agent({ name: "bex-security-test-agent" })
     return {};
   })
   .onRequest(methods.agent.session.setConfigOption, ({ params }) => {
+    if (process.env.BEX_TEST_INVALID_MODEL && params.configId === "model") {
+      throw RequestError.invalidParams(
+        { failure: { phase: "preparing", execution: "notSubmitted" } },
+        "Unknown synthetic model",
+      );
+    }
     if (process.env.BEX_TEST_REJECT_MODE_CONFIG && params.configId === "mode") {
       throw new Error("mode configuration must remain unchanged");
+    }
+    if (
+      process.env.BEX_TEST_EXPECT_MODEL &&
+      params.configId === "model" &&
+      params.value !== process.env.BEX_TEST_EXPECT_MODEL
+    ) {
+      throw new Error("incorrect model selection");
     }
     configOptions = configOptions.map((option) =>
       option.id === params.configId
@@ -160,6 +209,7 @@ const app = agent({ name: "bex-security-test-agent" })
   .onRequest(
     methods.agent.session.prompt,
     async ({ params, client, signal }) => {
+      trace("prompt");
       const text = params.prompt
         .filter((block) => block.type === "text")
         .map((block) => block.text)
@@ -172,7 +222,18 @@ const app = agent({ name: "bex-security-test-agent" })
           `prompt did not contain: ${process.env.BEX_TEST_EXPECT_PROMPT}`,
         );
       }
-      if (text === "wait for cancellation") {
+      if (process.env.BEX_TEST_LATE_CONFIG) {
+        configOptions = configOptions.map((option) =>
+          option.category === "thought_level"
+            ? { ...option, currentValue: "max" }
+            : option,
+        );
+        await client.notify(methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: { sessionUpdate: "config_option_update", configOptions },
+        });
+      }
+      if (text.includes("wait for cancellation")) {
         if (!signal.aborted) {
           await new Promise((resolve) =>
             signal.addEventListener("abort", resolve, { once: true }),

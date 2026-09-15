@@ -352,6 +352,7 @@ describe("CodexSecurity finding validation", () => {
     const stateDirectory = join(root, "state");
     await Promise.all([mkdir(repository), mkdir(codexHome)]);
     const captured: {
+      closed?: boolean;
       codex?: CodexOptions;
       thread?: ThreadOptions;
       prompt?: string;
@@ -381,6 +382,9 @@ describe("CodexSecurity finding validation", () => {
         createCodex: (options) => {
           captured.codex = options;
           return {
+            async close() {
+              captured.closed = true;
+            },
             startThread: (options) => {
               captured.thread = options;
               return {
@@ -437,6 +441,7 @@ describe("CodexSecurity finding validation", () => {
         outputDir: options.outputDir,
         threadId: "validation-thread",
       });
+      expect(captured.closed).toBe(true);
       expect(workbench).not.toHaveBeenCalled();
       expect(captured.prompt).toContain(
         JSON.stringify(join(PLUGIN_ROOT, "skills", "validation", "SKILL.md")),
@@ -530,11 +535,14 @@ describe("CodexSecurity finding validation", () => {
   ] as const)(
     "rejects %s responses",
     async (_label, response, complete, error) => {
-      const { client: security, options } = await validationClient(() =>
-        validationEvents(response, complete),
-      );
+      const {
+        client: security,
+        options,
+        captured,
+      } = await validationClient(() => validationEvents(response, complete));
       await using client = security;
       await expect(client.validate(options)).rejects.toThrow(error);
+      expect(captured.closed).toBe(true);
     },
   );
 

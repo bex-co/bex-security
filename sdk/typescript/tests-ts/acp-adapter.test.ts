@@ -1,19 +1,31 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
+import { ConfigurationError } from "../src/errors.js";
 import {
   AcpAgentClient,
   AcpCodex,
   pluginMcpServers,
+  museEnvironment,
   withoutCodexProviderCredentials,
 } from "../src/acp-adapter.js";
 
 const AGENT_PATH = fileURLToPath(
   new URL("./fixtures/acp-agent.mjs", import.meta.url),
 );
+
+const clients: AcpAgentClient[] = [];
+function agentClient(...args: ConstructorParameters<typeof AcpAgentClient>) {
+  const instance = new AcpAgentClient(...args);
+  clients.push(instance);
+  return instance;
+}
+afterEach(async () => {
+  await Promise.all(clients.splice(0).map((client) => client.close()));
+});
 
 async function collect(events: AsyncGenerator<ThreadEvent>) {
   return await Array.fromAsync(events);
@@ -62,7 +74,7 @@ describe("ACP adapter", () => {
   });
 
   test("negotiates namespaced agent capabilities", async () => {
-    const capabilities = await new AcpAgentClient(
+    const capabilities = await agentClient(
       { env: { ...process.env, BEX_TEST_AGENT: "muse" } },
       { agent: "muse" },
       AGENT_PATH,
@@ -76,7 +88,7 @@ describe("ACP adapter", () => {
   });
 
   test("keeps unadvertised capabilities unknown", async () => {
-    const capabilities = await new AcpAgentClient(
+    const capabilities = await agentClient(
       {},
       { agent: "claude" },
       AGENT_PATH,
@@ -170,7 +182,7 @@ describe("ACP adapter", () => {
   });
 
   test("selects Claude through the same ACP runtime and negotiates config options", async () => {
-    const thread = new AcpAgentClient(
+    const thread = agentClient(
       {},
       { agent: "claude", model: "sonnet", reasoningEffort: "high" },
       AGENT_PATH,
@@ -190,7 +202,7 @@ describe("ACP adapter", () => {
   });
 
   test("reports the resolved model behind a Claude model alias", async () => {
-    const thread = new AcpAgentClient(
+    const thread = agentClient(
       {},
       {
         agent: "claude",
@@ -210,7 +222,7 @@ describe("ACP adapter", () => {
   });
 
   test("runs native Kimi through ACP and maps Codex effort names", async () => {
-    const thread = new AcpAgentClient(
+    const thread = agentClient(
       {},
       {
         agent: "kimi",
@@ -232,7 +244,7 @@ describe("ACP adapter", () => {
   });
 
   test("runs Qwen through ACP and negotiates its model and effort", async () => {
-    const thread = new AcpAgentClient(
+    const thread = agentClient(
       {
         env: {
           ...process.env,
@@ -259,7 +271,7 @@ describe("ACP adapter", () => {
   });
 
   test("maps MiMo effort to an advertised model variant", async () => {
-    const thread = new AcpAgentClient(
+    const thread = agentClient(
       {
         env: {
           ...process.env,
@@ -284,7 +296,7 @@ describe("ACP adapter", () => {
   });
 
   test("reports unavailable MiMo effort variants", async () => {
-    const thread = new AcpAgentClient(
+    const thread = agentClient(
       {
         env: { ...process.env, BEX_TEST_AGENT: "mimo" },
       },
@@ -300,7 +312,7 @@ describe("ACP adapter", () => {
   });
 
   test("switches between advertised MiMo effort variants", async () => {
-    const thread = new AcpAgentClient(
+    const thread = agentClient(
       {
         env: { ...process.env, BEX_TEST_AGENT: "mimo" },
       },
@@ -325,13 +337,13 @@ describe("ACP adapter", () => {
     ["mimo", "MiMo Code"],
   ] as const)("reports missing %s executables", async (agent, label) => {
     await expect(
-      new AcpAgentClient({ env: { PATH: "" } }, { agent }).capabilities(),
+      agentClient({ env: { PATH: "" } }, { agent }).capabilities(),
     ).rejects.toThrow(`${label} CLI was not found on PATH`);
   });
 
   test("adds Qwen authentication setup guidance", async () => {
     await expect(
-      new AcpAgentClient(
+      agentClient(
         {
           env: { ...process.env, BEX_TEST_AUTH_ERROR: "1" },
         },
@@ -361,7 +373,7 @@ describe("ACP adapter", () => {
       }),
     );
     try {
-      const thread = new AcpAgentClient(
+      const thread = agentClient(
         {
           env: {
             ...process.env,
@@ -417,7 +429,7 @@ describe("ACP adapter", () => {
   test("bypasses unanswerable Muse approvals while keeping its sandbox", async () => {
     const root = await mkdtemp(join(tmpdir(), "bex-muse-mode-"));
     try {
-      const thread = new AcpAgentClient(
+      const thread = agentClient(
         {
           env: {
             ...process.env,
@@ -500,4 +512,181 @@ describe("ACP adapter", () => {
       }),
     ).toEqual({ PATH: "/synthetic/bin" });
   });
+});
+
+describe("Muse session configuration", () => {
+  test("selects manual models with a deferred catalog and on resume", async () => {
+    const thread = agentClient(
+      {
+        env: {
+          ...process.env,
+          BEX_TEST_AGENT: "muse",
+          BEX_TEST_MUSE_LAZY_MODELS: "1",
+          BEX_TEST_EXPECT_MODEL: "alternate",
+        },
+      },
+      { agent: "muse", model: "alternate", reasoningEffort: "high" },
+      AGENT_PATH,
+    ).startThread();
+    for (let turn = 0; turn < 2; turn++) {
+      const result = await thread.run("synthetic review");
+      expect(result.finalResponse).toContain(":allow");
+      expect(thread.modelConfiguration).toEqual({
+        model: "alternate",
+        reasoningEffort: "high",
+      });
+      await thread.close();
+    }
+  });
+
+  test("isolates scan history while keeping configuration and explicit data roots", () => {
+    const env = {
+      HOME: join(tmpdir(), "synthetic-home"),
+      XDG_CONFIG_HOME: join(tmpdir(), "synthetic-config"),
+      CODEX_SECURITY_STATE_DIR: join(tmpdir(), "synthetic-state"),
+      CODEX_SECURITY_SCAN_ID: "scan/one",
+    };
+    const first = museEnvironment(env);
+    expect(first["XDG_DATA_HOME"]).toBe(
+      join(
+        env.CODEX_SECURITY_STATE_DIR,
+        "agent-data",
+        "muse",
+        "scan-scan%2Fone",
+      ),
+    );
+    expect(museEnvironment({ ...env })["XDG_DATA_HOME"]).toBe(
+      first["XDG_DATA_HOME"],
+    );
+    expect(
+      museEnvironment({ ...env, CODEX_SECURITY_SCAN_ID: "two" })[
+        "XDG_DATA_HOME"
+      ],
+    ).not.toBe(first["XDG_DATA_HOME"]);
+    expect(first["HOME"]).toBe(env["HOME"]);
+    expect(first["XDG_CONFIG_HOME"]).toBe(env["XDG_CONFIG_HOME"]);
+    expect(
+      museEnvironment({ ...env, XDG_DATA_HOME: "explicit" })["XDG_DATA_HOME"],
+    ).toBe("explicit");
+    expect(
+      museEnvironment({ HOME: env["HOME"] })["XDG_DATA_HOME"],
+    ).toBeUndefined();
+  });
+});
+
+test("Muse keeps a connection for sequential turns and closes it explicitly", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bex-acp-lifecycle-"));
+  const trace = join(root, "requests.jsonl");
+  const client = agentClient(
+    { env: { ...process.env, BEX_TEST_AGENT: "muse", BEX_TEST_TRACE: trace } },
+    { agent: "muse" },
+    AGENT_PATH,
+  );
+  const thread = client.startThread();
+  try {
+    await thread.run("first synthetic turn");
+    await thread.run("second synthetic turn");
+    const requests = (await readFile(trace, "utf8")).trim().split("\n");
+    expect(requests.filter((method) => method === "initialize")).toHaveLength(
+      1,
+    );
+    expect(requests.filter((method) => method === "prompt")).toHaveLength(2);
+    expect(requests).not.toContain("resume");
+    await thread.close();
+    await thread.run("restored synthetic turn");
+    const restored = (await readFile(trace, "utf8")).trim().split("\n");
+    expect(restored.filter((method) => method === "initialize")).toHaveLength(
+      2,
+    );
+    expect(restored.filter((method) => method === "resume")).toHaveLength(1);
+  } finally {
+    await client.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Muse observes model configuration updates from its execution host", async () => {
+  const thread = agentClient(
+    {
+      env: {
+        ...process.env,
+        BEX_TEST_AGENT: "muse",
+        BEX_TEST_LATE_CONFIG: "1",
+      },
+    },
+    { agent: "muse", model: "alternate", reasoningEffort: "high" },
+    AGENT_PATH,
+  ).startThread();
+  await thread.run("synthetic review");
+  expect(thread.modelConfiguration).toEqual({
+    model: "alternate",
+    reasoningEffort: "max",
+  });
+});
+
+for (const interruption of ["cancel", "return", "close"] as const) {
+  test(`Muse cleans up its process after stream ${interruption}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "bex-acp-interruption-"));
+    const trace = join(root, "requests.jsonl");
+    const controller = new AbortController();
+    const client = agentClient(
+      {
+        env: { ...process.env, BEX_TEST_AGENT: "muse", BEX_TEST_TRACE: trace },
+      },
+      { agent: "muse" },
+      AGENT_PATH,
+    );
+    const thread = client.startThread();
+    try {
+      const { events } = await thread.runStreamed("wait for cancellation", {
+        signal: controller.signal,
+      });
+      expect((await events.next()).value?.type).toBe("thread.started");
+      if (interruption === "cancel") controller.abort();
+      if (interruption === "return") await events.return(undefined);
+      if (interruption === "close") await thread.close();
+      try {
+        await collect(events);
+      } catch {
+        /* Closing an active request can reject it. */
+      }
+      expect((await readFile(trace, "utf8")).trim().split("\n")).toContain(
+        "exit",
+      );
+      await thread.run("explicit next turn");
+      expect(
+        (await readFile(trace, "utf8"))
+          .trim()
+          .split("\n")
+          .filter((method) => method === "initialize"),
+      ).toHaveLength(2);
+    } finally {
+      await client.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Muse invalid model errors retain the protocol cause for review classification", async () => {
+  const thread = agentClient(
+    {
+      env: {
+        ...process.env,
+        BEX_TEST_AGENT: "muse",
+        BEX_TEST_INVALID_MODEL: "1",
+      },
+    },
+    { agent: "muse", model: "unknown" },
+    AGENT_PATH,
+  ).startThread();
+  try {
+    await thread.run("synthetic review");
+    throw new Error("expected model validation failure");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as Error).cause).toMatchObject({
+      code: -32602,
+      data: { failure: { execution: "notSubmitted" } },
+    });
+  }
 });

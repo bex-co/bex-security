@@ -205,6 +205,7 @@ interface ScanEvent {
 }
 
 interface CodexClientLike {
+  close?(): Promise<void>;
   startThread(options: ThreadOptions): CodexThreadLike;
   capabilities?(signal?: AbortSignal): Promise<AcpAgentCapabilities>;
 }
@@ -629,6 +630,8 @@ export class CodexSecurity {
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
     let outputDir = "";
+    let validationClient: CodexClientLike | undefined;
+    let validationFailed = false;
     try {
       throwIfAborted(signal);
       if (
@@ -688,6 +691,7 @@ export class CodexSecurity {
         },
         options.auth,
       );
+      validationClient = codex;
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
         workingDirectory: outputDir,
@@ -727,9 +731,16 @@ export class CodexSecurity {
       }
       return { ...result, outputDir, threadId };
     } catch (error) {
+      validationFailed = true;
       if (this.#closed) this.#requireOpen();
       throwIfAborted(signal, outputDir);
       throw error;
+    } finally {
+      try {
+        await validationClient?.close?.();
+      } catch (error) {
+        if (!validationFailed) throw error;
+      }
     }
   }
 
@@ -839,6 +850,7 @@ export class CodexSecurity {
       threadId: string | null;
     } | null = null;
     let preparedTargetWarnings: string[] = [];
+    let scanClient: CodexClientLike | undefined;
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
     let activeScan: {
@@ -1436,6 +1448,7 @@ export class CodexSecurity {
         runtimePaths,
         options.auth,
       );
+      scanClient = codex;
       const capabilities = await codex.capabilities?.(signal);
       let hostReviewArtifact: string | null = null;
       if (capabilities?.delegatedWorkers === false) {
@@ -1979,6 +1992,7 @@ export class CodexSecurity {
       // throws synchronously, still cannot skip a pending startup-lock release below.
       try {
         for (const cleanup of await Promise.allSettled([
+          scanClient?.close?.(),
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
         ])) {

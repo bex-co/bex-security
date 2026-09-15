@@ -255,10 +255,28 @@ npx @bex-co/bex-security scan . --agent muse
 npx @bex-co/bex-security scan . --agent muse --model muse-spark-1.2-contributor --effort high
 ```
 
+Bex forwards explicit Muse model IDs to the adapter, including when its initial
+model catalog is deferred. Configuration updates from the running host update
+the scan's model metadata. Sequential turns in the same thread reuse the ACP
+connection; review assignments retain separate sessions and close them when the
+attempt ends. Cancellation and scan completion close owned connections.
+
+Unless `XDG_DATA_HOME` is explicitly set, registered scans use a persistent Muse
+data directory under the Bex state directory, keyed by scan ID. This keeps
+unrelated personal session history out of native startup work. Authentication
+and Muse configuration paths remain unchanged. Retain the scan's agent data to
+restore its sessions; switching data directories does not migrate existing
+sessions. Native history traversal within a large scan still depends on Muse.
+
+Invalid model configuration stops review recovery immediately. Structured
+startup failures that confirm no submission receive at most two attempts;
+possibly submitted turns stop with their original error. Smaller-file recovery
+continues for incomplete read evidence, without relaxing coverage checks.
+
 Muse owns authentication and model selection. Bex passes its stdio security
-workbench through ACP; additional workspace roots and interactive approvals
-are not available through Muse Code 0.2.1. When the adapter reports that
-delegated workers are unavailable, Bex uses capability-selected host review
+workbench through ACP and uses noninteractive approval handling for automated
+assignments. When the adapter reports that delegated workers are unavailable,
+Bex uses capability-selected host review
 assignments and accepts progress only from completed, non-truncated file reads.
 
 Qwen Code can run through its native ACP mode. Install it, start `qwen`, and
