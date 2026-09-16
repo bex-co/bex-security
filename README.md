@@ -575,6 +575,21 @@ events from a scan and its workers. Press `d` during a scan to inspect
 unredacted details; `a`, `m`, and `1`–`9` select all, main, or worker
 sessions. These events can contain credentials.
 
+## Generate SECURITY.md
+
+Draft repository-wide or component-scoped `SECURITY.md` guidance for future scans:
+
+```bash
+codex-security policy .
+codex-security policy . --path services/api --knowledge-base architecture.md
+```
+
+The command saves a draft outside the checkout; it does not install it or run a
+vulnerability scan. Review the proposed diff before copying the policy. Supporting architecture,
+threat-model, and review documents stay outside the repository and may contain
+sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
+for headless generation, saved artifacts, and SDK usage.
+
 ## TypeScript SDK
 
 Codex Security is a Javascript package:
@@ -645,7 +660,28 @@ classification operation; original scan severity stays unchanged. See [severity 
 
 ## Other providers
 
+To use another inference provider, set its API key and select a model:
+
+```bash
+export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_REGION="us-east-2"
+bex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+
+export OPENROUTER_API_KEY="<your-openrouter-api-key>"
+bex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
+
+export FIREWORKS_API_KEY="<your-fireworks-api-key>"
+bex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+```
+
+## Documentation
+
+See [project configuration](docs/project-configuration.md) for reusable YAML/JSON
+settings, CLI overrides, and editor schema support.
+
 For complete command help, runtime defaults, native multi-agent worker limits,
 environment variables, deep-scan configuration, and SDK options, see the
 [package README](sdk/typescript/README.md) and the
 [upstream CLI reference](https://learn.chatgpt.com/docs/security/cli/reference).
+Upstream behavior this fork keeps is documented in the
+[Codex Security documentation](https://learn.chatgpt.com/docs/security/cli).

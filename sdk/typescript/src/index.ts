@@ -1,4 +1,14 @@
 export { CodexSecurity, createSecurity } from "./api.js";
+export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
+export type {
+  ResolvedProjectConfig,
+  ProjectConfigProvenance,
+} from "./project-config.js";
+export type {
+  ProjectConfigInput,
+  ProjectScope,
+} from "./project-config-schema.js";
+export type { ScanSettings } from "./scan-settings.js";
 export { classifySeverity } from "./classify-severity.js";
 export type {
   ClassifySeverityOptions,
@@ -103,6 +113,17 @@ export type {
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
+export {
+  resolveSecurityPolicyTarget,
+  securityPolicyDiff,
+} from "./security-policy.js";
+export type {
+  SecurityPolicyDraft,
+  SecurityPolicyOptions,
+  SecurityPolicyPreflight,
+  SecurityPolicyStage,
+  SecurityPolicyTarget,
+} from "./security-policy.js";
 export { checkScanPublication, publishScan } from "./publish.js";
 export { publishScanToCustom } from "./custom-publish.js";
 export type {
@@ -168,4 +189,5 @@ export {
   validateMode,
 } from "./targets.js";
 export type { NormalizedTarget, ScanMode, ScanTarget } from "./targets.js";
+export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
