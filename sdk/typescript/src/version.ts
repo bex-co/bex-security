@@ -11,7 +11,8 @@ export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
 export const BUNDLED_PLUGIN_VERSION = "0.1.95" as const;
 
-const PACKAGE_NAME = "@bex-co/bex-security";
+/** @internal Published package name used for update notices and schema hints. */
+export const PACKAGE_NAME = "@bex-co/bex-security";
 
 export interface UpdateNotice {
   readonly currentVersion: string;

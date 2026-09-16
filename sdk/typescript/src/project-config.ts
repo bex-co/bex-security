@@ -25,6 +25,7 @@ import {
   type ProjectScope,
 } from "./project-config-schema.js";
 import { expandHome } from "./runtime.js";
+import { PACKAGE_NAME } from "./version.js";
 import {
   DEFAULT_SCAN_AUTH,
   DEFAULT_SCAN_MODE,
@@ -177,7 +178,7 @@ export function projectConfigStarter(
 ): string {
   const schemaPath = resolve(
     directory,
-    "node_modules/@openai/codex-security/schemas/project-config.schema.json",
+    `node_modules/${PACKAGE_NAME}/schemas/project-config.schema.json`,
   );
   const relativeSchema = relative(
     dirname(resolve(directory, path)),

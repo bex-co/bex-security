@@ -76,7 +76,7 @@ test.each([
     expect(JSON.parse(output.text())).toEqual({ path });
     const selected = await readProjectConfig(path);
     expect(selected.input).toEqual({
-      $schema: `${modules}/@openai/codex-security/schemas/project-config.schema.json`,
+      $schema: `${modules}/@bex-co/bex-security/schemas/project-config.schema.json`,
     });
     const contents = await readFile(path, "utf8");
     expect(await main(args, capture().stream, capture().stream, deps)).toBe(2);

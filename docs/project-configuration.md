@@ -121,7 +121,7 @@ The resolver maps file keys to the existing SDK options:
 Use an explicit file with `loadProjectConfig()`:
 
 ```ts
-import { CodexSecurity, loadProjectConfig } from "@openai/codex-security";
+import { CodexSecurity, loadProjectConfig } from "@bex-co/bex-security";
 
 const { config, options } = await loadProjectConfig("codex-security.yaml");
 await using security = new CodexSecurity(config);
@@ -141,7 +141,7 @@ For configuration already in memory, pass the same structured object to
 import {
   resolveProjectConfig,
   type ProjectConfigInput,
-} from "@openai/codex-security";
+} from "@bex-co/bex-security";
 
 const input = {
   scan: { mode: "deep", scope: { paths: ["src"] } },
@@ -312,7 +312,7 @@ is self-contained Draft-07 and ships in the npm package. A project-root YAML fil
 can use:
 
 ```yaml
-# yaml-language-server: $schema=./node_modules/@openai/codex-security/schemas/project-config.schema.json
+# yaml-language-server: $schema=./node_modules/@bex-co/bex-security/schemas/project-config.schema.json
 {}
 ```
 
