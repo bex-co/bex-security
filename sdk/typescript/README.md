@@ -13,6 +13,44 @@ available for compatibility.
 > and each Bex release on that baseline remain visible. The public API may
 > change between minor versions before `1.0.0`.
 
+## Host-review diagnostics
+
+When an ACP agent cannot delegate workers, Bex manages review assignments and
+saves diagnostics inside the existing scan output directory once the review
+inventory has been generated and validated. Inventory/setup failures happen
+before this assignment-diagnostic stage.
+
+| Artifact                                                               | Contents                                                                                                                                   |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `artifacts/01_context/host-review/inventory.json`                      | Registered review inventory.                                                                                                               |
+| `artifacts/01_context/host-review/assignment-N-attempt-M/request.json` | Files requested, saved before agent startup.                                                                                               |
+| `artifacts/01_context/host-review/assignment-N-attempt-M/result.json`  | Attempt phase, completed read evidence, claimed files, response validity, terminal status, unvalidated candidates and safe failure reason. |
+| `artifacts/01_context/host-review/assignment-N.json`                   | Combined assignment outcome, remaining files and number of attempts.                                                                       |
+| `artifacts/01_context/host-review/incomplete-review.json`              | Partial coverage, missing files, assignment history and unvalidated candidates after failure or cancellation.                              |
+| `incomplete-report.md`                                                 | Readable incomplete-scan summary linking to the diagnostics.                                                                               |
+
+Complete host reviews still produce `review.json` for the coordinator. Only the
+normal validation/reporting workflow produces the canonical `report.md`.
+An incomplete summary does not turn failure into success: SDK calls still reject,
+CLI commands still exit nonzero, and coverage requirements remain unchanged.
+Candidates from incomplete or failed attempts are evidence for later investigation,
+not confirmed findings. Repeated candidates may appear in the attempt history.
+
+Requests and terminal results are saved independently so completed attempts survive
+a later failure. A request without a result has no recorded terminal outcome;
+it does not prove the model ran or that files were read. Abrupt process termination
+may prevent the final JSON and Markdown summary from being written. Diagnostic
+write failures are warnings and do not replace the original scan error or stop an
+otherwise successful review. SDK users receive these notices through `onWarning`;
+the CLI displays them with its existing scan warnings.
+
+Use the existing `--output-dir` (SDK: `outputDir`) to select a persistent directory
+outside the target repository, or keep the existing default persistent scan-state
+location. An explicit temporary directory can be removed by the operating system;
+Bex does not back up diagnostics elsewhere. Container users should retain the
+existing output/state volume. These local files can contain target paths and
+candidate details; review them before sharing, as with other scan artifacts.
+
 ## Install
 
 ```bash

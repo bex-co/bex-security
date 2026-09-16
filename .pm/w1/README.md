@@ -5,3 +5,5 @@
 ## Milestones
 
 - [x] **m1** — Make Muse ACP a trustworthy Bex Security agent (11 tasks) ← from maintainer reliability diagnosis
+
+- [x] **m2** — Durable host-review failure evidence and incomplete summaries (7 tasks) ← from maintainer failure-retention diagnosis

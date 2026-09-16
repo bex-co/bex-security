@@ -9,6 +9,7 @@ import {
   AuthenticationRequiredError,
   ConfigurationError,
   IncompleteScanError,
+  safeErrorMessage,
 } from "./errors.js";
 import { pathIsWithin } from "./path-scope.js";
 import {
@@ -70,6 +71,7 @@ export interface HostReviewOptions {
   signal: AbortSignal;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
+  onWarning?: (warning: string) => void;
 }
 
 export interface HostReviewResult {
@@ -87,6 +89,51 @@ interface AssignmentResult {
   candidates: Array<z.infer<typeof candidateSchema>>;
   attempts: number;
   lastFailure: string | null;
+}
+
+interface AttemptResult {
+  schemaVersion: 1;
+  assignment: string;
+  attempt: number;
+  files: string[];
+  status: "incomplete" | "complete" | "failed" | "canceled";
+  phase: "starting" | "streaming" | "validating";
+  readFiles: string[];
+  claimedFiles: string[];
+  missingFiles: string[];
+  candidates: Array<z.infer<typeof candidateSchema>>;
+  responseStatus: "none" | "invalid" | "valid";
+  turnCompleted: boolean;
+  failure: string | null;
+}
+
+function warn(options: HostReviewOptions, message: string): void {
+  try {
+    options.onWarning?.(message);
+  } catch {
+    // Diagnostic observers cannot interrupt the review or replace its error.
+  }
+}
+
+async function saveDiagnostic(
+  options: HostReviewOptions,
+  path: string,
+  content: unknown,
+): Promise<boolean> {
+  try {
+    await writeFile(
+      path,
+      typeof content === "string" ? content : `${JSON.stringify(content)}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    return true;
+  } catch (error) {
+    warn(
+      options,
+      `Could not save host review diagnostic ${path}: ${safeErrorMessage(error)}`,
+    );
+    return false;
+  }
 }
 
 /** Run evidence-backed review assignments for an ACP agent that cannot
@@ -110,49 +157,115 @@ export async function runHostReviewAssignments(
   }
   const accepted = new Set<string>();
   const results: AssignmentResult[] = [];
+  await saveDiagnostic(options, join(root, "inventory.json"), {
+    schemaVersion: 1,
+    files: inventory,
+  });
   let pending = inventory;
   let nextAssignment = 0;
-  for (const filesPerAssignment of [
-    FILES_PER_ASSIGNMENT,
-    RECOVERY_FILES_PER_ASSIGNMENT,
-    1,
-  ]) {
-    if (pending.length === 0) break;
-    const round = await runAssignmentRound(
-      options,
-      root,
-      partitionInventory(pending, filesPerAssignment),
-      accepted,
-      nextAssignment,
-    );
-    nextAssignment += round.length;
-    results.push(...round);
-    pending = round.flatMap((result) => result.missingFiles);
-  }
+  try {
+    for (const filesPerAssignment of [
+      FILES_PER_ASSIGNMENT,
+      RECOVERY_FILES_PER_ASSIGNMENT,
+      1,
+    ]) {
+      if (pending.length === 0) break;
+      const round = await runAssignmentRound(
+        options,
+        root,
+        partitionInventory(pending, filesPerAssignment),
+        accepted,
+        nextAssignment,
+        results,
+      );
+      nextAssignment += round.length;
+      pending = round.flatMap((result) => result.missingFiles);
+    }
 
-  if (accepted.size !== inventory.length) {
-    throw new IncompleteScanError(
-      `Host review ended before every registered file had read evidence (${accepted.size}/${inventory.length} files); ${pending.length} files lacked completed read evidence after recovery.`,
+    if (accepted.size !== inventory.length) {
+      throw new IncompleteScanError(
+        `Host review ended before every registered file had read evidence (${accepted.size}/${inventory.length} files); ${pending.length} files lacked completed read evidence after recovery.`,
+      );
+    }
+    const artifactPath = join(root, "review.json");
+    const artifact = {
+      schemaVersion: 1,
+      filesReviewed: accepted.size,
+      assignments: results,
+      candidates: results.flatMap((result) => result.candidates),
+    };
+    await writeFile(artifactPath, `${JSON.stringify(artifact)}\n`, {
+      flag: "wx",
+      mode: 0o600,
+      signal: options.signal,
+    });
+    return {
+      artifactPath,
+      filesReviewed: accepted.size,
+      assignments: results.length,
+      candidates: artifact.candidates.length,
+    };
+  } catch (error) {
+    const missingFiles = inventory.filter((path) => !accepted.has(path));
+    const failure = safeErrorMessage(error);
+    const artifact = {
+      schemaVersion: 1,
+      status: options.signal.aborted ? "canceled" : "incomplete",
+      filesTotal: inventory.length,
+      filesReviewed: accepted.size,
+      missingFiles,
+      failure,
+      assignments: results,
+      candidates: results.flatMap((result) => result.candidates),
+    };
+    await saveDiagnostic(
+      options,
+      join(root, "incomplete-review.json"),
+      artifact,
     );
+    const latestFailures = new Map<string, string>();
+    for (const result of results) {
+      for (const path of result.missingFiles) {
+        if (result.lastFailure !== null) {
+          latestFailures.set(path, result.lastFailure);
+        }
+      }
+    }
+    const summaryPath = join(options.scanDirectory, "incomplete-report.md");
+    const summary = [
+      "# Incomplete security scan",
+      "",
+      "This scan did not complete. Coverage is incomplete or review handoff failed. This is a diagnostic summary, not a validated security report.",
+      "Retained candidates have not been independently validated. Their presence or absence does not establish that the repository is secure.",
+      "",
+      `Status: ${artifact.status}`,
+      `Files with accepted read evidence: ${accepted.size} / ${inventory.length}`,
+      `Unvalidated candidate records retained: ${artifact.candidates.length}`,
+      "",
+      "## Failure",
+      "",
+      failure,
+      "",
+      "## Missing files",
+      "",
+      ...missingFiles.map(
+        (path) =>
+          `- ${JSON.stringify(path)}: ${latestFailures.get(path) ?? "No completed assignment recorded."}`,
+      ),
+      "",
+      "## Retained diagnostics",
+      "",
+      "- [Partial review, candidates and assignment failures](artifacts/01_context/host-review/incomplete-review.json)",
+      "- Each assignment attempt directory contains request.json and, when saved, result.json. A request without a result has no recorded terminal outcome.",
+      "- assignment-N.json retains each finished assignment's combined outcome. Interrupted work may have only attempt records.",
+      "- Diagnostic write failures are reported as warnings; check which files are present before relying on them.",
+      "",
+    ].join("\n");
+    if (await saveDiagnostic(options, summaryPath, summary)) {
+      warn(options, `Incomplete scan summary saved at ${summaryPath}`);
+    }
+    throw error;
   }
-  const artifactPath = join(root, "review.json");
-  const artifact = {
-    schemaVersion: 1,
-    filesReviewed: accepted.size,
-    assignments: results,
-    candidates: results.flatMap((result) => result.candidates),
-  };
-  await writeFile(artifactPath, `${JSON.stringify(artifact)}\n`, {
-    flag: "wx",
-    mode: 0o600,
-    signal: options.signal,
-  });
-  return {
-    artifactPath,
-    filesReviewed: accepted.size,
-    assignments: results.length,
-    candidates: artifact.candidates.length,
-  };
 }
 
 async function runAssignmentRound(
@@ -161,37 +274,40 @@ async function runAssignmentRound(
   batches: string[][],
   accepted: Set<string>,
   firstAssignment: number,
+  results: AssignmentResult[],
 ): Promise<AssignmentResult[]> {
-  const results: AssignmentResult[] = [];
+  const round: AssignmentResult[] = [];
   let next = 0;
   const concurrency = Math.min(Math.max(1, options.workers), batches.length);
-  let failed = false;
+  let stopScheduling = false;
   const settled = await Promise.allSettled(
     Array.from({ length: concurrency }, async () => {
       for (;;) {
         options.signal.throwIfAborted();
-        if (failed) return;
+        if (stopScheduling) return;
         const index = next++;
         const files = batches[index];
         if (files === undefined) return;
         try {
-          results[index] = await runAssignment(
+          const result = await runAssignment(
             options,
             root,
             firstAssignment + index,
             files,
             accepted,
+            results,
           );
+          round[index] = result;
         } catch (error) {
-          failed = true;
+          stopScheduling = true;
           throw error;
         }
       }
     }),
   );
-  const rejected = settled.find((result) => result.status === "rejected");
-  if (rejected?.status === "rejected") throw rejected.reason;
-  return results;
+  const failed = settled.find((result) => result.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
+  return round;
 }
 
 function reviewFailureDisposition(
@@ -220,150 +336,186 @@ async function runAssignment(
   index: number,
   files: string[],
   accepted: Set<string>,
+  results: AssignmentResult[],
 ): Promise<AssignmentResult> {
   const assigned = new Set(files);
   const evidence = new Set<string>();
   const claimed = new Set<string>();
-  const candidates: Array<z.infer<typeof candidateSchema>> = [];
-  let lastFailure = "no valid response";
-  for (let attempt = 1; attempt <= ASSIGNMENT_ATTEMPTS; attempt++) {
-    options.signal.throwIfAborted();
-    const workingDirectory = join(
-      root,
-      `assignment-${index + 1}-attempt-${attempt}`,
-    );
-    await mkdir(workingDirectory, { recursive: true, mode: 0o700 });
-    const thread = options.client.startThread({
-      workingDirectory,
-      skipGitRepoCheck: true,
-      approvalPolicy: "never",
-    });
-    const missing = files.filter((path) => !evidence.has(path));
-    const prompt = assignmentPrompt(options.repository, missing);
-    let attemptFailed = false;
-    try {
-      const { events } = await thread.runStreamed(prompt, {
-        signal: options.signal,
-        outputSchema: z.toJSONSchema(assignmentResponseSchema, {
-          target: "openapi-3.0",
-        }),
-      });
-      let structuredResponse: z.infer<typeof assignmentResponseSchema> | null =
-        null;
-      let completed = false;
-      for await (const event of events) {
-        options.signal.throwIfAborted();
-        for (const activity of scanActivitiesFromEvent(
-          event,
-          options.repository,
-        )) {
-          options.onActivity?.(activity);
-        }
-        for (const path of scanReviewEvidenceFromEvent(
-          event,
-          options.repository,
-        )) {
-          if (!assigned.has(path) || evidence.has(path)) continue;
-          evidence.add(path);
-        }
-        if (
-          event["type"] === "item.completed" &&
-          isRecord(event["item"]) &&
-          event["item"]["type"] === "agent_message" &&
-          typeof event["item"]["text"] === "string"
-        ) {
-          const parsed = parseAssignmentResponse(event["item"]["text"]);
-          if (parsed !== null) structuredResponse = parsed;
-        } else if (event["type"] === "turn.completed") {
-          completed = true;
-        } else if (event["type"] === "turn.failed") {
-          const error = isRecord(event["error"])
-            ? event["error"]["message"]
-            : null;
-          throw new Error(
-            typeof error === "string" ? error : "ACP review turn failed",
-          );
-        } else if (
-          event["type"] === "error" &&
-          typeof event["message"] === "string"
-        ) {
-          throw new Error(event["message"]);
-        }
-      }
-      if (!completed)
-        throw new Error("ACP review turn ended before completion");
-      if (structuredResponse === null)
-        throw new Error(
-          "ACP review turn returned no valid structured response",
-        );
-      const response = structuredResponse;
-      for (const path of response.reviewedFiles) {
-        if (assigned.has(path) && evidence.has(path)) claimed.add(path);
-      }
-      let advanced = false;
-      for (const path of claimed) {
-        if (accepted.has(path)) continue;
-        accepted.add(path);
-        advanced = true;
-      }
-      if (advanced) {
-        options.onProgress?.({
-          phase: "discovery",
-          filesCompleted: accepted.size,
-          filesTotal: options.expectedFilesTotal,
-        });
-      }
-      candidates.push(
-        ...response.candidates.filter((candidate) =>
-          assigned.has(candidate.path),
-        ),
-      );
-      const remaining = files.filter(
-        (path) => !claimed.has(path) || !evidence.has(path),
-      );
-      if (remaining.length > 0) {
-        lastFailure = `${remaining.length} assigned files lacked completed read evidence`;
-        continue;
-      }
-      return {
-        id: `assignment-${index + 1}`,
-        files,
-        reviewedFiles: files,
-        missingFiles: [],
-        candidates,
-        attempts: attempt,
-        lastFailure: null,
-      };
-    } catch (error) {
-      attemptFailed = true;
-      options.signal.throwIfAborted();
-      const disposition = reviewFailureDisposition(error);
-      if (
-        disposition === "stop" ||
-        (disposition === "startup" && attempt === ASSIGNMENT_ATTEMPTS)
-      )
-        throw error;
-      lastFailure = error instanceof Error ? error.message : String(error);
-    } finally {
-      try {
-        await thread.close?.();
-      } catch (error) {
-        if (!attemptFailed) throw error;
-      }
-    }
-  }
-  const reviewedFiles = files.filter(
-    (path) => claimed.has(path) && evidence.has(path),
-  );
-  return {
+  const result: AssignmentResult = {
     id: `assignment-${index + 1}`,
     files,
-    reviewedFiles,
-    missingFiles: files.filter((path) => !reviewedFiles.includes(path)),
-    candidates,
-    attempts: ASSIGNMENT_ATTEMPTS,
-    lastFailure,
+    reviewedFiles: [],
+    missingFiles: files,
+    candidates: [],
+    attempts: 0,
+    lastFailure: "no valid response",
   };
+  results.push(result);
+  try {
+    for (let attempt = 1; attempt <= ASSIGNMENT_ATTEMPTS; attempt++) {
+      options.signal.throwIfAborted();
+      result.attempts = attempt;
+      const workingDirectory = join(root, `${result.id}-attempt-${attempt}`);
+      const missing = result.missingFiles;
+      const record: AttemptResult = {
+        schemaVersion: 1,
+        assignment: result.id,
+        attempt,
+        files: missing,
+        status: "incomplete",
+        phase: "starting",
+        readFiles: [],
+        claimedFiles: [],
+        missingFiles: missing,
+        candidates: [],
+        responseStatus: "none",
+        turnCompleted: false,
+        failure: null,
+      };
+      let thread: HostReviewThread | undefined;
+      let attemptFailed = false;
+      try {
+        await mkdir(workingDirectory, { recursive: true, mode: 0o700 });
+        await saveDiagnostic(options, join(workingDirectory, "request.json"), {
+          schemaVersion: 1,
+          assignment: result.id,
+          attempt,
+          files: missing,
+        });
+        thread = options.client.startThread({
+          workingDirectory,
+          skipGitRepoCheck: true,
+          approvalPolicy: "never",
+        });
+        const { events } = await thread.runStreamed(
+          assignmentPrompt(options.repository, missing),
+          {
+            signal: options.signal,
+            outputSchema: z.toJSONSchema(assignmentResponseSchema, {
+              target: "openapi-3.0",
+            }),
+          },
+        );
+        record.phase = "streaming";
+        let response: z.infer<typeof assignmentResponseSchema> | null = null;
+        for await (const event of events) {
+          options.signal.throwIfAborted();
+          for (const activity of scanActivitiesFromEvent(
+            event,
+            options.repository,
+          )) {
+            options.onActivity?.(activity);
+          }
+          for (const path of scanReviewEvidenceFromEvent(
+            event,
+            options.repository,
+          )) {
+            if (!assigned.has(path)) continue;
+            evidence.add(path);
+            if (!record.readFiles.includes(path)) record.readFiles.push(path);
+          }
+          if (
+            event["type"] === "item.completed" &&
+            isRecord(event["item"]) &&
+            event["item"]["type"] === "agent_message" &&
+            typeof event["item"]["text"] === "string"
+          ) {
+            const parsed = parseAssignmentResponse(event["item"]["text"]);
+            if (parsed !== null) {
+              response = parsed;
+              record.responseStatus = "valid";
+              record.claimedFiles = parsed.reviewedFiles.filter((path) =>
+                assigned.has(path),
+              );
+              record.candidates = parsed.candidates.filter((candidate) =>
+                assigned.has(candidate.path),
+              );
+            } else if (response === null) {
+              record.responseStatus = "invalid";
+            }
+          } else if (event["type"] === "turn.completed") {
+            record.turnCompleted = true;
+          } else if (event["type"] === "turn.failed") {
+            const error = isRecord(event["error"])
+              ? event["error"]["message"]
+              : null;
+            throw new Error(
+              typeof error === "string" ? error : "ACP review turn failed",
+            );
+          } else if (
+            event["type"] === "error" &&
+            typeof event["message"] === "string"
+          ) {
+            throw new Error(event["message"]);
+          }
+        }
+        record.phase = "validating";
+        if (!record.turnCompleted)
+          throw new Error("ACP review turn ended before completion");
+        if (response === null)
+          throw new Error(
+            "ACP review turn returned no valid structured response",
+          );
+        for (const path of response.reviewedFiles) {
+          if (assigned.has(path) && evidence.has(path)) claimed.add(path);
+        }
+        let advanced = false;
+        for (const path of claimed) {
+          if (accepted.has(path)) continue;
+          accepted.add(path);
+          advanced = true;
+        }
+        if (advanced) {
+          options.onProgress?.({
+            phase: "discovery",
+            filesCompleted: accepted.size,
+            filesTotal: options.expectedFilesTotal,
+          });
+        }
+        result.reviewedFiles = files.filter(
+          (path) => claimed.has(path) && evidence.has(path),
+        );
+        result.missingFiles = files.filter(
+          (path) => !claimed.has(path) || !evidence.has(path),
+        );
+        if (result.missingFiles.length === 0) {
+          record.status = "complete";
+          result.lastFailure = null;
+          return result;
+        }
+        record.failure = `${result.missingFiles.length} assigned files lacked completed read evidence`;
+        result.lastFailure = record.failure;
+      } catch (error) {
+        attemptFailed = true;
+        record.status = options.signal.aborted ? "canceled" : "failed";
+        record.failure = safeErrorMessage(error);
+        result.lastFailure = record.failure;
+        options.signal.throwIfAborted();
+        const disposition = reviewFailureDisposition(error);
+        if (
+          disposition === "stop" ||
+          (disposition === "startup" && attempt === ASSIGNMENT_ATTEMPTS)
+        )
+          throw error;
+      } finally {
+        record.missingFiles = result.missingFiles;
+        result.candidates.push(...record.candidates);
+        await saveDiagnostic(
+          options,
+          join(workingDirectory, "result.json"),
+          record,
+        );
+        try {
+          await thread?.close?.();
+        } catch (error) {
+          if (!attemptFailed) throw error;
+        }
+      }
+    }
+    return result;
+  } finally {
+    await saveDiagnostic(options, join(root, `${result.id}.json`), result);
+  }
 }
 
 async function generateInventory(

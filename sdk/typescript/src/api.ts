@@ -1486,6 +1486,13 @@ export class CodexSecurity {
               activity,
             ),
           onProgress: reportProgress,
+          onWarning: (warning) =>
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              warning,
+            ),
         });
         hostReviewArtifact = hostReview.artifactPath;
       }

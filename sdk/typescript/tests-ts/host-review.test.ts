@@ -1,4 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -13,6 +20,10 @@ interface FakeTurn {
   claimed: string[];
   trailingMessages?: string[];
   repeatStructuredResponse?: boolean;
+  startError?: Error;
+  message?: string;
+  failure?: string;
+  noCompletion?: boolean;
 }
 
 function client(repository: string, turns: FakeTurn[]): HostReviewClient {
@@ -20,6 +31,7 @@ function client(repository: string, turns: FakeTurn[]): HostReviewClient {
   return {
     startThread() {
       const turn = turns[next++] ?? { read: [], claimed: [] };
+      if (turn.startError) throw turn.startError;
       return {
         async runStreamed() {
           async function* events() {
@@ -56,9 +68,11 @@ function client(repository: string, turns: FakeTurn[]): HostReviewClient {
               item: {
                 id: `message-${next}`,
                 type: "agent_message",
-                text: turn.repeatStructuredResponse
-                  ? `${structuredResponse}${structuredResponse}`
-                  : structuredResponse,
+                text:
+                  turn.message ??
+                  (turn.repeatStructuredResponse
+                    ? `${structuredResponse}${structuredResponse}`
+                    : structuredResponse),
               },
             };
             for (const text of turn.trailingMessages ?? []) {
@@ -71,7 +85,11 @@ function client(repository: string, turns: FakeTurn[]): HostReviewClient {
                 },
               };
             }
-            yield { type: "turn.completed", usage: null };
+            if (turn.failure) {
+              yield { type: "turn.failed", error: { message: turn.failure } };
+            } else if (!turn.noCompletion) {
+              yield { type: "turn.completed", usage: null };
+            }
           }
           return { events: events() };
         },
@@ -105,7 +123,421 @@ async function largeFixture(files: number) {
   return value;
 }
 
+function reviewOptions(value: Awaited<ReturnType<typeof fixture>>) {
+  return {
+    repository: value.repository,
+    target: { kind: "repository" as const, paths: [] },
+    scanDirectory: value.scanDirectory,
+    pluginRoot: value.root,
+    python: process.execPath,
+    expectedFilesTotal: 2,
+    workers: 2,
+    signal: new AbortController().signal,
+  };
+}
+
+function diagnosticRoot(value: Awaited<ReturnType<typeof fixture>>) {
+  return join(value.scanDirectory, "artifacts", "01_context", "host-review");
+}
+
+async function json(path: string) {
+  return JSON.parse(await readFile(path, "utf8"));
+}
+
 describe("host ACP review assignments", () => {
+  test("retains every startup failure and lists missing files without a canonical report", async () => {
+    const value = await fixture();
+    const warnings: string[] = [];
+    let starts = 0;
+    try {
+      await expect(
+        runHostReviewAssignments({
+          ...reviewOptions(value),
+          onWarning: (warning) => warnings.push(warning),
+          client: {
+            startThread() {
+              starts++;
+              throw new Error("Synthetic host initialization timed out");
+            },
+          },
+        }),
+      ).rejects.toThrow(/lacked completed read evidence/);
+      const root = diagnosticRoot(value);
+      const attempts = (await readdir(root)).filter((name) =>
+        name.includes("-attempt-"),
+      );
+      expect(attempts.length).toBe(starts);
+      expect(starts).toBeGreaterThan(2);
+      for (const name of attempts) {
+        const request = await json(join(root, name, "request.json"));
+        expect(await json(join(root, name, "result.json"))).toMatchObject({
+          files: request.files,
+          phase: "starting",
+          status: "failed",
+          responseStatus: "none",
+          turnCompleted: false,
+          readFiles: [],
+          failure: "Synthetic host initialization timed out",
+        });
+      }
+      expect(await json(join(root, "incomplete-review.json"))).toMatchObject({
+        status: "incomplete",
+        filesReviewed: 0,
+        missingFiles: ["a.ts", "b.ts"],
+      });
+      const summary = await readFile(
+        join(value.scanDirectory, "incomplete-report.md"),
+        "utf8",
+      );
+      expect(summary).toContain("0 / 2");
+      expect(summary).toContain("a.ts");
+      expect(summary).toContain("not a validated security report");
+      expect(warnings).toContainEqual(
+        expect.stringContaining("incomplete-report.md"),
+      );
+      expect(await readdir(value.scanDirectory)).not.toContain("report.md");
+      expect(await readdir(root)).not.toContain("review.json");
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("retains partial coverage, candidates and exact missing-file retries", async () => {
+    const value = await fixture();
+    try {
+      await expect(
+        runHostReviewAssignments({
+          ...reviewOptions(value),
+          client: client(value.repository, [
+            { read: ["a.ts"], claimed: ["a.ts"] },
+          ]),
+        }),
+      ).rejects.toThrow("(1/2 files)");
+      const root = diagnosticRoot(value);
+      expect(await json(join(root, "incomplete-review.json"))).toMatchObject({
+        filesReviewed: 1,
+        missingFiles: ["b.ts"],
+        candidates: [{ path: "a.ts" }],
+      });
+      expect(
+        await json(join(root, "assignment-1-attempt-1", "result.json")),
+      ).toMatchObject({
+        status: "incomplete",
+        readFiles: ["a.ts"],
+        claimedFiles: ["a.ts"],
+        missingFiles: ["b.ts"],
+        responseStatus: "valid",
+        turnCompleted: true,
+      });
+      expect(
+        await json(join(root, "assignment-1-attempt-2", "request.json")),
+      ).toMatchObject({ files: ["b.ts"] });
+      expect(await json(join(root, "assignment-1.json"))).toMatchObject({
+        attempts: 2,
+        reviewedFiles: ["a.ts"],
+        missingFiles: ["b.ts"],
+      });
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    {
+      name: "malformed output",
+      message: "not JSON",
+      responseStatus: "invalid",
+      phase: "validating",
+      reason: "no valid structured response",
+    },
+    {
+      name: "missing terminal event",
+      noCompletion: true,
+      responseStatus: "valid",
+      phase: "validating",
+      reason: "ended before completion",
+    },
+    {
+      name: "stream failure",
+      failure: "Synthetic stream disconnected",
+      responseStatus: "valid",
+      phase: "streaming",
+      reason: "Synthetic stream disconnected",
+    },
+  ])(
+    "distinguishes $name from missing reads and re-requests unaccepted files",
+    async (scenario) => {
+      const value = await fixture();
+      try {
+        await runHostReviewAssignments({
+          ...reviewOptions(value),
+          client: client(value.repository, [
+            { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"], ...scenario },
+            { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] },
+          ]),
+        });
+        const root = diagnosticRoot(value);
+        const first = await json(
+          join(root, "assignment-1-attempt-1", "result.json"),
+        );
+        expect(first).toMatchObject({
+          status: "failed",
+          phase: scenario.phase,
+          responseStatus: scenario.responseStatus,
+          readFiles: ["a.ts", "b.ts"],
+          missingFiles: ["a.ts", "b.ts"],
+        });
+        expect(first.failure).toContain(scenario.reason);
+        expect(
+          await json(join(root, "assignment-1-attempt-2", "request.json")),
+        ).toMatchObject({ files: ["a.ts", "b.ts"] });
+        expect(await readdir(value.scanDirectory)).not.toContain(
+          "incomplete-report.md",
+        );
+      } finally {
+        await rm(value.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("cancellation saves in-flight evidence and candidates without accepting an unfinished turn", async () => {
+    const value = await fixture();
+    const controller = new AbortController();
+    const reason = new Error("Synthetic caller canceled");
+    let observed!: () => void;
+    const started = new Promise<void>((resolve) => {
+      observed = resolve;
+    });
+    try {
+      const run = runHostReviewAssignments({
+        ...reviewOptions(value),
+        signal: controller.signal,
+        client: {
+          startThread(options) {
+            return {
+              async runStreamed() {
+                expect(
+                  await json(join(options.workingDirectory!, "request.json")),
+                ).toMatchObject({ files: ["a.ts", "b.ts"] });
+                return {
+                  events: (async function* () {
+                    yield {
+                      type: "item.completed",
+                      item: {
+                        id: "read",
+                        type: "mcp_tool_call",
+                        tool: "read_file",
+                        arguments: { path: join(value.repository, "a.ts") },
+                        status: "completed",
+                      },
+                    };
+                    yield {
+                      type: "item.completed",
+                      item: {
+                        id: "answer",
+                        type: "agent_message",
+                        text: JSON.stringify({
+                          reviewedFiles: ["a.ts"],
+                          candidates: [
+                            {
+                              path: "a.ts",
+                              title: "Candidate",
+                              summary: "Needs validation",
+                            },
+                          ],
+                        }),
+                      },
+                    };
+                    await new Promise<void>((_resolve, reject) => {
+                      controller.signal.addEventListener(
+                        "abort",
+                        () => reject(controller.signal.reason),
+                        { once: true },
+                      );
+                      observed();
+                    });
+                  })(),
+                };
+              },
+            };
+          },
+        },
+      });
+      void run.catch(() => {});
+      await Promise.race([started, run]);
+      controller.abort(reason);
+      await expect(run).rejects.toBe(reason);
+      const root = diagnosticRoot(value);
+      expect(
+        await json(join(root, "assignment-1-attempt-1", "result.json")),
+      ).toMatchObject({
+        status: "canceled",
+        phase: "streaming",
+        readFiles: ["a.ts"],
+        claimedFiles: ["a.ts"],
+        turnCompleted: false,
+      });
+      expect(await json(join(root, "incomplete-review.json"))).toMatchObject({
+        status: "canceled",
+        filesReviewed: 0,
+        missingFiles: ["a.ts", "b.ts"],
+        candidates: [{ path: "a.ts" }],
+      });
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("cancellation retains completed assignments beside an active worker", async () => {
+    const value = await largeFixture(49);
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation");
+    const reviewed = [
+      "a.ts",
+      "b.ts",
+      ...Array.from(
+        { length: 48 },
+        (_, index) => `file-${String(index).padStart(2, "0")}.ts`,
+      ),
+    ];
+    const completedClient = client(value.repository, [
+      { read: reviewed, claimed: reviewed },
+    ]);
+    let started!: () => void;
+    let progressed!: () => void;
+    const ready = Promise.all([
+      new Promise<void>((resolve) => {
+        started = resolve;
+      }),
+      new Promise<void>((resolve) => {
+        progressed = resolve;
+      }),
+    ]);
+    try {
+      const run = runHostReviewAssignments({
+        ...reviewOptions(value),
+        expectedFilesTotal: 51,
+        signal: controller.signal,
+        onProgress: () => progressed(),
+        client: {
+          startThread(options) {
+            if (options.workingDirectory?.includes("assignment-1-")) {
+              return completedClient.startThread(options);
+            }
+            return {
+              async runStreamed() {
+                return {
+                  events: (async function* () {
+                    const aborted = new Promise<void>((resolve) => {
+                      controller.signal.addEventListener(
+                        "abort",
+                        () => resolve(),
+                        { once: true },
+                      );
+                    });
+                    started();
+                    await aborted;
+                    controller.signal.throwIfAborted();
+                  })(),
+                };
+              },
+            };
+          },
+        },
+      });
+      void run.catch(() => {});
+      await Promise.race([ready, run]);
+      controller.abort(reason);
+      await expect(run).rejects.toBe(reason);
+      const root = diagnosticRoot(value);
+      expect(await json(join(root, "incomplete-review.json"))).toMatchObject({
+        status: "canceled",
+        filesReviewed: 50,
+        missingFiles: ["file-48.ts"],
+        assignments: [
+          { reviewedFiles: reviewed, missingFiles: [] },
+          {
+            reviewedFiles: [],
+            missingFiles: ["file-48.ts"],
+            lastFailure: "Synthetic cancellation",
+          },
+        ],
+      });
+      expect(
+        await json(join(root, "assignment-2-attempt-1", "result.json")),
+      ).toMatchObject({ status: "canceled" });
+    } finally {
+      controller.abort(reason);
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("diagnostic write and observer failures cannot stop successful review", async () => {
+    const value = await fixture();
+    const root = diagnosticRoot(value);
+    await mkdir(join(root, "assignment-1-attempt-1"), { recursive: true });
+    await writeFile(
+      join(root, "assignment-1-attempt-1", "request.json"),
+      "existing diagnostic",
+    );
+    await mkdir(join(root, "assignment-1-attempt-1", "result.json"));
+    const warnings: string[] = [];
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        client: client(value.repository, [
+          { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] },
+        ]),
+        onWarning(warning) {
+          warnings.push(warning);
+          throw new Error("observer failed");
+        },
+      });
+      expect(result.filesReviewed).toBe(2);
+      expect(warnings).toHaveLength(2);
+      expect(
+        await readFile(
+          join(root, "assignment-1-attempt-1", "request.json"),
+          "utf8",
+        ),
+      ).toBe("existing diagnostic");
+      expect(await json(join(root, "assignment-1.json"))).toMatchObject({
+        reviewedFiles: ["a.ts", "b.ts"],
+      });
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+  test("summary write failures preserve the original coverage error", async () => {
+    const value = await fixture();
+    const root = diagnosticRoot(value);
+    await mkdir(join(root, "incomplete-review.json"), { recursive: true });
+    await mkdir(join(value.scanDirectory, "incomplete-report.md"));
+    const warnings: string[] = [];
+    try {
+      await expect(
+        runHostReviewAssignments({
+          ...reviewOptions(value),
+          client: client(value.repository, []),
+          onWarning(warning) {
+            warnings.push(warning);
+            throw new Error("observer failed");
+          },
+        }),
+      ).rejects.toThrow(/lacked completed read evidence/);
+      expect(warnings).toHaveLength(2);
+      expect(
+        warnings.every((warning) => warning.startsWith("Could not save")),
+      ).toBe(true);
+      expect(await json(join(root, "assignment-1.json"))).toMatchObject({
+        reviewedFiles: [],
+        missingFiles: ["a.ts", "b.ts"],
+      });
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
   test("backs complete progress with exact completed read evidence", async () => {
     const value = await fixture();
     const progress: number[] = [];

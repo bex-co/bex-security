@@ -343,6 +343,13 @@ assignments and advances file coverage only for completed, non-truncated read
 operations. The existing scan command needs no Muse-specific orchestration
 flag.
 
+Host-managed reviews save per-attempt requests and outcomes in the scan output
+directory. If assignment review fails or is canceled, `incomplete-report.md` explains the
+coverage gap and links to retained diagnostics and unvalidated candidates.
+The scan still fails; this summary is not the validated `report.md`.
+See [retained host-review diagnostics](sdk/typescript/README.md#host-review-diagnostics)
+for artifact details and output retention.
+
 Qwen Code runs through its native ACP server. Install it, launch `qwen`, and
 use `/auth` once to configure a provider before scanning:
 
