@@ -1,6 +1,6 @@
 {
   "name": "@bex-co/bex-security",
-  "version": "0.1.23-bex.1",
+  "version": "0.1.27-bex.1",
   "description": "Agent-portable security scanning CLI and TypeScript SDK built on Codex Security and ACP",
   "license": "Apache-2.0",
   "author": "Bex Security",
@@ -28,8 +28,8 @@
   ],
   "bex": {
     "upstreamPackage": "@openai/codex-security",
-    "upstreamVersion": "0.1.23",
-    "upstreamCommit": "047414649cc19afe4817c751a5d5c574b8108b81",
+    "upstreamVersion": "0.1.27",
+    "upstreamCommit": "1a3ca64333f894426dde0c0a7721d717c99f8cba",
     "upstreamRepository": "https://github.com/openai/codex-security"
   },
   "type": "module",

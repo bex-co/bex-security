@@ -9,7 +9,9 @@ trustLockfile: true
 auditConfig:
   ignoreGhsas:
     # extractPluginZip rejects every symlink entry before extract-zip creates it.
+    # Both advisories describe that same unpatched symlink-entry behavior.
     - GHSA-jmr9-qjv8-65gv
+    - GHSA-7pqw-9j4j-h8q3
 
 # Stryker rewrites tsconfig files through the compiler API removed in TypeScript 7.
 packageExtensions:
