@@ -1518,6 +1518,13 @@ export class CodexSecurity {
       if (postScanPrompt?.trim()) {
         runPostScan = () => thread.runStreamed(postScanPrompt, { signal });
       }
+      if (capabilities?.delegatedWorkers === false) {
+        prompt = [
+          prompt,
+          "",
+          "This runtime has no delegated workers. Run the baseline audit, packet investigations, validation, and the canonical artifact writes yourself in this turn. Do not launch a workflow, subagent, background task, or any other worker, and do not end the turn while launched work is still running; a launch acknowledgement is not a result.",
+        ].join("\n");
+      }
       if (hostReviewArtifact !== null) {
         prompt = [
           prompt,

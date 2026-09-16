@@ -3524,6 +3524,7 @@ describe("CodexSecurity orchestration", () => {
               expect(prompt).toContain(
                 "The SDK's current in-scope file-count estimate is 4207",
               );
+              expect(prompt).not.toContain("no delegated workers");
               await copyCompletedScan(root);
               async function* scanEvents(): AsyncGenerator<ThreadEvent> {
                 for await (const event of completedEvents()) {

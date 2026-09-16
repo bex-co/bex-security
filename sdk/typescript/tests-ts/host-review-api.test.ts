@@ -61,6 +61,12 @@ test.each(["success", "failure"] as const)(
                 if (!assignment) {
                   coordinatorStarted = true;
                   expect(prompt).toContain("review.json");
+                  expect(prompt).toContain(
+                    "This runtime has no delegated workers.",
+                  );
+                  expect(prompt).toContain(
+                    "a launch acknowledgement is not a result",
+                  );
                   await copyCompletedScan(root);
                   return { events: completedEvents() };
                 }
