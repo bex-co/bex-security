@@ -128,7 +128,6 @@ import {
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   errorMessage,
-  safeErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -198,11 +197,13 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
+  environmentWithGit,
   pluginMetadata,
   planOutputArchive,
   prepareScanArtifactRestorer,
   prepareOutputDir,
   preparePersistentOutputRoot,
+  probeCodexSandbox,
   requireModelSafeOutputDir,
   requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
@@ -224,6 +225,7 @@ import {
   enclosingGitWorktreeRoots,
   normalizeRepository,
   normalizeTarget,
+  gitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
   type NormalizedTarget,
@@ -232,6 +234,10 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
+import {
+  inspectTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -427,7 +433,7 @@ type ScanObserverName =
   | "onStage"
   | "onWarning";
 
-export interface ScanPreflight extends DeepScanOptions {
+export interface ScanPreflight extends DeepScanOptions, ScanModelConfiguration {
   agent?: AcpAgentName;
   repository: string;
   target: NormalizedTarget;
@@ -436,9 +442,7 @@ export interface ScanPreflight extends DeepScanOptions {
   outputDir: string | null;
   archiveDir?: string;
   authentication: ScanAuthentication;
-  model: string;
   modelProvider?: string;
-  reasoningEffort: string;
   maxCostUsd?: number;
   deepScanSources?: DeepScanSources;
 }
@@ -483,6 +487,7 @@ interface ClientDependencies {
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
 }
@@ -1057,6 +1062,7 @@ export class CodexSecurity {
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
         options.auth,
+        undefined,
         policyCodexConfig(session.sessionConfig),
         inputs.gitMetadataPaths.length === 0
           ? []
@@ -1112,7 +1118,7 @@ export class CodexSecurity {
             if (options.maxCostUsd !== undefined) budgetController.abort(error);
             else
               warn(
-                `Could not track policy-generation cost: ${safeErrorMessage(error)}`,
+                `Could not track policy-generation cost: ${errorMessage(error)}`,
               );
           },
         });
@@ -1134,7 +1140,7 @@ export class CodexSecurity {
                 tracker.start(event["thread_id"]);
               }
             },
-            onReconnect: (message) => warn(safeErrorMessage(message)),
+            onReconnect: warn,
           });
           usage = turn.usage;
           signal.throwIfAborted();
@@ -1146,7 +1152,7 @@ export class CodexSecurity {
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
             if (options.maxCostUsd !== undefined) throw error;
             warn(
-              `Could not track policy-generation cost: ${safeErrorMessage(error)}`,
+              `Could not track policy-generation cost: ${errorMessage(error)}`,
             );
             const cost = estimateScanCost(model.model, usage);
             if (cost !== null) reportCost(cost);
@@ -1177,7 +1183,7 @@ export class CodexSecurity {
           if (!stopped)
             await tracker
               .stop(usage)
-              .catch((error: unknown) => warn(safeErrorMessage(error)));
+              .catch((error: unknown) => warn(errorMessage(error)));
         }
       };
       return await runSecurityPolicyStages({
@@ -1346,6 +1352,22 @@ export class CodexSecurity {
         python,
       } = session;
       releaseCredentialHome = session.releaseCredentialHome;
+      let git: InspectedExecutable = {
+        executable: null,
+        environment: selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          modelProvider,
+        ),
+      };
+      for (const source of [repo, ...(knowledgeBase?.sources ?? [])]) {
+        git = await inspectTrustedExecutable(
+          "git",
+          git.environment,
+          (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+        );
+      }
+      checkOpen();
       const deepScanConfigPath =
         mode === "deep"
           ? (runtime.deepScanConfigPath ??
@@ -1637,11 +1659,7 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-          ),
+          ...environmentWithGit(git.environment, git),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,
@@ -1942,6 +1960,7 @@ export class CodexSecurity {
         session,
         runtimePaths,
         options.auth,
+        git,
       );
       scanClient = codex;
       const capabilities = await codex.capabilities?.(signal);
@@ -2081,7 +2100,7 @@ export class CodexSecurity {
               "onWarning",
               options.onWarning,
               options.onObserverError,
-              `Could not save scan session: ${safeErrorMessage(error)}`,
+              `Could not save scan session: ${errorMessage(error)}`,
             );
           }
         },
@@ -2478,7 +2497,7 @@ export class CodexSecurity {
           await writeCustomValidationStatus(scanDir, {
             scanId: activeScan.id,
             status: "incomplete",
-            reason: safeErrorMessage(failure),
+            reason: errorMessage(failure),
           }).catch(() => undefined);
         }
         try {
@@ -2486,9 +2505,8 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
-            // Scan history can be shared; never persist credential-bearing failures.
             "--message",
-            safeErrorMessage(failure).slice(0, 2400),
+            errorMessage(failure).slice(0, 2400),
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
@@ -2748,6 +2766,7 @@ export class CodexSecurity {
     session: PreparedSession,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
+    git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
@@ -2776,13 +2795,16 @@ export class CodexSecurity {
       modelProvider,
     );
     let environment: ProcessEnvironment = {
-      ...pluginExecutionEnvironment(
-        python,
-        withoutCodexHome(
-          agent !== "codex"
-            ? withoutCodexProviderCredentials(inheritedEnvironment)
-            : inheritedEnvironment,
+      ...environmentWithGit(
+        pluginExecutionEnvironment(
+          python,
+          withoutCodexHome(
+            agent !== "codex"
+              ? withoutCodexProviderCredentials(inheritedEnvironment)
+              : inheritedEnvironment,
+          ),
         ),
+        git,
       ),
       ...(externalProvider === null
         ? {}
@@ -3497,7 +3519,7 @@ export class CodexSecurity {
           "--scan-id",
           activeScan.id,
           "--message",
-          safeErrorMessage(error).slice(0, 2400),
+          errorMessage(error).slice(0, 2400),
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();
@@ -3694,8 +3716,16 @@ export class CodexSecurity {
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       throwIfAborted(signal);
+      const codexCommand = this.#codexCommand();
+      if (configuredAgent(this.config) === "codex") {
+        await (this.#dependencies.probeCodexSandbox ?? probeCodexSandbox)(
+          codexCommand,
+          { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },
+          signal,
+        );
+      }
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
-        codexCommand: this.#codexCommand(),
+        codexCommand,
         environment: withoutCodexHome(processEnvironment),
         signal,
       });

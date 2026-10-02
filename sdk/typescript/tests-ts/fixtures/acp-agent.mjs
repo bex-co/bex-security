@@ -94,6 +94,12 @@ if (process.env.BEX_TEST_AGENT === "mimo") {
 const app = agent({ name: "bex-security-test-agent" })
   .onRequest(methods.agent.initialize, () => {
     trace("initialize");
+    if (
+      process.env.BEX_TEST_EXPECT_CODEX_PATH &&
+      process.env.CODEX_PATH !== process.env.BEX_TEST_EXPECT_CODEX_PATH
+    ) {
+      throw new Error("unexpected Codex executable");
+    }
     if (process.env.BEX_TEST_AUTH_ERROR) {
       process.stderr.write("authentication required\n");
       throw new Error("authentication required");

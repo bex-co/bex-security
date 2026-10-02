@@ -568,7 +568,7 @@ Add `--verbose` to print scan diagnostics to stderr:
 
 Verbose diagnostics may contain sensitive data. Review local logs before
 sharing them. Saved failure summaries, bulk-scan receipts, and the normal
-activity feed omit messages that contain recognizable credentials.
+activity feed preserve diagnostic text, including credential-shaped values.
 
 Use `./bex-security scans logs SCAN_ID` to inspect saved session
 events from a scan and its workers. Press `d` during a scan to inspect
@@ -580,8 +580,8 @@ sessions. These events can contain credentials.
 Draft repository-wide or component-scoped `SECURITY.md` guidance for future scans:
 
 ```bash
-codex-security policy .
-codex-security policy . --path services/api --knowledge-base architecture.md
+npx @bex-co/bex-security policy .
+npx @bex-co/bex-security policy . --path services/api --knowledge-base architecture.md
 ```
 
 The command saves a draft outside the checkout; it does not install it or run a
@@ -591,6 +591,9 @@ sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-
 for headless generation, saved artifacts, and SDK usage.
 
 ## TypeScript SDK
+
+To suggest owners for existing findings from source and Git history, see
+[Suggest finding owners](sdk/typescript/README.md#suggest-finding-owners).
 
 Codex Security is a Javascript package:
 
@@ -652,7 +655,7 @@ command uploads completed findings and their repository ID. The SDK and
 locally, and persist accepted duplicate groups; `--all-repositories`
 opts into the broader scope.
 
-Use `codex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md`
+Use `npx @bex-co/bex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md`
 to assess selected findings under your own policy before publishing tickets.
 Scan classification checkpoints each finding in SQLite and reuses matching
 assessments on reruns; `--reprocess` forces reassessment. The SDK exposes the same

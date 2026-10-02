@@ -43,7 +43,7 @@ from rank_preview import (
     preview_for,
     preview_for_bytes,
 )
-from workbench_target import git_blob_bytes, git_directory_snapshot_paths
+from workbench_target import git_blob_bytes, git_command, git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -124,7 +124,6 @@ EXCLUDED_FILENAMES = {
 SHARD_INPUT_GLOB = "rank-shard-*.input.jsonl"
 SHARD_OUTPUT_GLOB = "rank-shard-*.output.jsonl"
 SHARD_INPUT_PATTERN = re.compile(r"^rank-shard-([0-9]{4,})\.input\.jsonl$")
-DIRECT_SCOPE_PREVIEW_READ_BYTES = 64 * 1024
 RANK_POOL_PLAN_SCHEMA_VERSION = 1
 RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
@@ -507,11 +506,7 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
             ):
                 preview = ""
             else:
-                preview, is_binary = preview_for(
-                    path,
-                    args.preview_bytes,
-                    max_read_bytes=DIRECT_SCOPE_PREVIEW_READ_BYTES if directly_requested else None,
-                )
+                preview, is_binary = preview_for(path, args.preview_bytes)
                 if is_binary and not directly_requested:
                     continue
             rows_by_path.setdefault(
@@ -547,8 +542,11 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                     "--hidden",
                     "--no-require-git",
                     "--null",
+                    # Also exclude descendants when the scope starts inside .git.
                     "--glob",
-                    "!.git/**",
+                    "!**/.git",
+                    "--glob",
+                    "!**/.git/**",
                     "--",
                     str(scope_path.relative_to(repo)),
                 ]
@@ -629,20 +627,16 @@ def bind_repo_scopes(args: argparse.Namespace) -> None:
 
 
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo),
-            "diff",
-            "--name-status",
-            "-z",
-            "--diff-filter=ACMRD",
-            *diff_args,
-        ],
-        check=True,
-        capture_output=True,
+    result = git_command(
+        repo,
+        "diff",
+        "--name-status",
+        "-z",
+        "--diff-filter=ACMRD",
+        *diff_args,
+        text=False,
     )
+    result.check_returncode()
     fields = result.stdout.split(b"\0")
     if fields and not fields[-1]:
         fields.pop()
@@ -666,11 +660,15 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
-        untracked = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
-            capture_output=True,
-            check=True,
+        untracked = git_command(
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            text=False,
         )
+        untracked.check_returncode()
         combined = dict(staged)
         combined.update(unstaged)
         combined.update(

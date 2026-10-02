@@ -44,6 +44,43 @@ function completedMessage(events: ThreadEvent[]): string | undefined {
 }
 
 describe("ACP adapter", () => {
+  test.each(["inherited", "override"] as const)(
+    "uses the %s Codex executable for concurrent fresh and resumed turns",
+    async (selection) => {
+      await Promise.all(
+        ["first", "second"].map(async (scan) => {
+          const selected = join(tmpdir(), scan, "selected runtime", "codex");
+          const override = join(tmpdir(), scan, "explicit runtime", "codex");
+          const client = agentClient(
+            {
+              env: {
+                ...process.env,
+                CODEX_CLI_PATH: selected,
+                CODEX_PATH: join(tmpdir(), "ambient runtime", "codex"),
+                BEX_TEST_EXPECT_CODEX_PATH:
+                  selection === "override" ? override : selected,
+              },
+              ...(selection === "override"
+                ? { codexPathOverride: override }
+                : {}),
+            },
+            { agent: "codex" },
+            AGENT_PATH,
+          );
+          const thread = client.startThread({
+            workingDirectory: process.cwd(),
+          });
+          expect((await thread.run("first turn")).finalResponse).toBe(
+            "new:reject",
+          );
+          expect((await thread.run("second turn")).finalResponse).toBe(
+            "resumed:reject",
+          );
+        }),
+      );
+    },
+  );
+
   test("forwards native command authentication overrides to Codex ACP", async () => {
     const config = {
       model_provider: "synthetic",

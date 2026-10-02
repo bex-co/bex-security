@@ -20,14 +20,14 @@ saves diagnostics inside the existing scan output directory once the review
 inventory has been generated and validated. Inventory/setup failures happen
 before this assignment-diagnostic stage.
 
-| Artifact                                                               | Contents                                                                                                                                   |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `artifacts/01_context/host-review/inventory.json`                      | Registered review inventory.                                                                                                               |
-| `artifacts/01_context/host-review/assignment-N-attempt-M/request.json` | Files requested, saved before agent startup.                                                                                               |
-| `artifacts/01_context/host-review/assignment-N-attempt-M/result.json`  | Attempt phase, completed read evidence, claimed files, response validity, terminal status, unvalidated candidates and safe failure reason. |
-| `artifacts/01_context/host-review/assignment-N.json`                   | Combined assignment outcome, remaining files and number of attempts.                                                                       |
-| `artifacts/01_context/host-review/incomplete-review.json`              | Partial coverage, missing files, assignment history and unvalidated candidates after failure or cancellation.                              |
-| `incomplete-report.md`                                                 | Readable incomplete-scan summary linking to the diagnostics.                                                                               |
+| Artifact                                                               | Contents                                                                                                                              |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `artifacts/01_context/host-review/inventory.json`                      | Registered review inventory.                                                                                                          |
+| `artifacts/01_context/host-review/assignment-N-attempt-M/request.json` | Files requested, saved before agent startup.                                                                                          |
+| `artifacts/01_context/host-review/assignment-N-attempt-M/result.json`  | Attempt phase, completed read evidence, claimed files, response validity, terminal status, unvalidated candidates and failure reason. |
+| `artifacts/01_context/host-review/assignment-N.json`                   | Combined assignment outcome, remaining files and number of attempts.                                                                  |
+| `artifacts/01_context/host-review/incomplete-review.json`              | Partial coverage, missing files, assignment history and unvalidated candidates after failure or cancellation.                         |
+| `incomplete-report.md`                                                 | Readable incomplete-scan summary linking to the diagnostics.                                                                          |
 
 Complete host reviews still produce `review.json` for the coordinator. Only the
 normal validation/reporting workflow produces the canonical `report.md`.
@@ -151,7 +151,7 @@ the matching local checkout:
 import {
   CodexSecurity,
   importGitHubCodeScanningAlerts,
-} from "@openai/codex-security";
+} from "@bex-co/bex-security";
 
 const findings = await importGitHubCodeScanningAlerts({
   repository: "example/repository",
@@ -239,7 +239,7 @@ cancellation, workflow, and runtime controls. Load the same project file used by
 `scan -c` through the SDK:
 
 ```ts
-import { CodexSecurity, loadProjectConfig } from "@openai/codex-security";
+import { CodexSecurity, loadProjectConfig } from "@bex-co/bex-security";
 
 const { config, options } = await loadProjectConfig("codex-security.yaml");
 await using security = new CodexSecurity(config);
@@ -506,8 +506,8 @@ use the same stored login as `scan`, including a sign-in created with
 `codex-security login --device-auth`:
 
 ```bash
-npx @openai/codex-security patch OCCURRENCE_ID --auth chatgpt
-npx @openai/codex-security verify-fix OCCURRENCE_ID --auth api-key
+npx @bex-co/bex-security patch OCCURRENCE_ID --auth chatgpt
+npx @bex-co/bex-security verify-fix OCCURRENCE_ID --auth api-key
 ```
 
 `--auth chatgpt` ignores environment API keys. `--auth api-key` requires
@@ -552,10 +552,10 @@ that tree when read-only enforcement is required. See the
 [upstream sandbox limitation](https://github.com/openai/codex/issues/32395).
 
 ```bash
-npx @openai/codex-security policy .
-npx @openai/codex-security policy . --path services/api
-npx @openai/codex-security policy . --knowledge-base architecture.md --model gpt-5.6-terra --effort high
-npx @openai/codex-security policy . --dry-run --json
+npx @bex-co/bex-security policy .
+npx @bex-co/bex-security policy . --path services/api
+npx @bex-co/bex-security policy . --knowledge-base architecture.md --model gpt-5.6-terra --effort high
+npx @bex-co/bex-security policy . --dry-run --json
 ```
 
 The repository defaults to the current directory. `--path` selects a component,
@@ -604,7 +604,7 @@ directory; `--output-dir` selects an empty directory outside every enclosing
 Git checkout and its Git metadata.
 
 ```bash
-npx @openai/codex-security policy . --path services/api \
+npx @bex-co/bex-security policy . --path services/api \
   --headless --output-dir /path/outside/repository/api-policy --json
 ```
 
@@ -631,7 +631,7 @@ documents. Fix the reported problem and use a new output directory to retry.
 ### Generate a policy from TypeScript
 
 ```ts
-import { CodexSecurity } from "@openai/codex-security";
+import { CodexSecurity } from "@bex-co/bex-security";
 
 const security = new CodexSecurity();
 try {
@@ -727,11 +727,15 @@ npx @bex-co/bex-security patch --linear-issue SEC-123 --linear-issue SEC-124
 npx @bex-co/bex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
 ```
 
-Run `npx @bex-co/bex-security --version` for the installed CLI version or
-`npx @bex-co/bex-security info --json` for the package, bundled plugin, Codex runtime,
-default model, reasoning effort, and first-scan command. A scan with `--dry-run`
-also reports its effective model and reasoning effort, including `--codex`
-overrides, without starting Codex or contacting the network.
+Use `--help` to browse commands by task, or `<command> --help` (or `-h`) for
+options and examples. `scan --help` groups options by scope, Deep Scan, results,
+and patching; `publish scan --help` groups destination settings. `scans` and
+`findings` run `list` when no subcommand is given.
+
+Use `--version` for the installed version, and
+`info --json` for package, plugin, runtime, and model details. `--dry-run`
+runs local preflight checks. `info -c FILE --json` inspects resolved configuration
+and its sources without a repository or runtime.
 
 ### Project files
 
@@ -826,6 +830,26 @@ SARIF output, when produced, is at `<scan-dir>/exports/results.sarif`.
 Scans are report-only by default. Set `--fail-on-severity high` to exit with
 `1` if a completed scan finds high or critical issues. Incomplete scans exit
 with `2`, writing available results to stdout and a coverage warning to stderr.
+
+For machine-readable scan output (`--format json` or `--format jsonl`), a scan
+execution failure writes one structured object to stdout:
+
+```json
+{
+  "status": "failed",
+  "code": "SCAN_FAILED",
+  "message": "..."
+}
+```
+
+With `--full-output`, the same code and message are reported under `error` in
+an `ok: false` envelope instead.
+
+The command still exits with `2` for runtime, export, invalid-input, or
+incomplete-scan failures, and human-readable diagnostics remain on stderr.
+Use `scan --schema --format json` to discover this failure variant alongside
+the successful scan output. Cancellation and termination retain their `130`
+and `143` exit codes.
 
 ### Import findings as a saved scan
 
@@ -1076,13 +1100,28 @@ sandbox = "unelevated"
 ```
 
 Use `--model` to choose a model and `--effort minimal|low|medium|high|xhigh|max`
-for reasoning effort. Repeat `--codex KEY=VALUE` for other TOML settings:
+for reasoning effort. Both flags work with `scan`, `bulk-scan`, `scan-components`,
+`policy`, `validate`, `patch`, `verify-fix`, `suggest-owners`, `classify-severity`,
+`scans match`, and `scans compare`.
+
+Model IDs are passed through to Codex, including `gpt-6-astra`, `gpt-6.1-sol`,
+and `gpt-6-luna`; availability depends on your credentials and inference provider.
+For Astra and GPT-6.1 Sol, use `low`, `medium`, `high`, `xhigh`, or `max`, as
+documented in the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model).
+Omitting these flags preserves each command's defaults: scans, policy generation,
+validation, patching, verification, and owner suggestions use `gpt-5.6-sol`/`xhigh`;
+matching and severity classification use Codex's configured model and `medium` effort.
+
+Repeat `--codex KEY=VALUE` for other TOML settings on commands that support it:
 
 ```bash
 npx @bex-co/bex-security scan . \
-  --model gpt-5.6-terra \
+  --model gpt-6.1-sol \
   --effort high \
   --codex features.multi_agent_v2.max_concurrent_threads_per_session=4
+
+npx @bex-co/bex-security patch issues.md --model gpt-6-astra --effort max
+npx @bex-co/bex-security verify-fix issues.md --model gpt-6.1-sol --effort high
 ```
 
 The thread limit of `9` includes the parent and up to eight delegated workers.
@@ -1099,17 +1138,38 @@ or `features.plugins` are rejected, including in profiles. Multi-agent v2 must
 stay enabled: `agents.max_threads` and
 `features.multi_agent_v2.enabled=false` are rejected.
 
-`validate`, `patch`, and `verify-fix` accept `--auth`, `--effort`, and the `model`,
-`model_reasoning_effort`, and `analytics.enabled` keys in `--codex`, but no
-other runtime overrides.
+`validate`, `patch`, and `verify-fix` accept `--auth`, `--model`, and `--effort`.
+Their `--codex` overrides are limited to `model`, `model_reasoning_effort`,
+`model_provider`, `model_providers`, and `analytics.enabled`.
+Use the same provider settings as `scan` when routing a standalone patch
+through a custom inference gateway:
+
+```bash
+npx @bex-co/bex-security patch "Security issue" \
+  --model gateway-model \
+  --codex 'model_provider="gateway"' \
+  --codex 'model_providers.gateway.name="Gateway"' \
+  --codex 'model_providers.gateway.base_url="https://gateway.example.test/v1"' \
+  --codex 'model_providers.gateway.wire_api="responses"' \
+  --codex 'model_providers.gateway.env_key="GATEWAY_API_KEY"'
+```
+
+Set the selected provider's API-key environment variable before running the
+command. Model, effort, and provider settings also apply to
+`patch --assess-patch-risk`.
+Sandbox, approval, and plugin settings remain controlled by the command.
+
+`scans resume` and `scans rerun` retain the saved scan's settings. `dedupe` uses
+separate screening and review models, so it does not expose a single model/effort
+override.
 
 Use `--codex 'analytics.enabled=false'` to disable Codex usage analytics and
 built-in metrics for a command:
 
 ```bash
-npx @openai/codex-security validate "Candidate finding" --codex 'analytics.enabled=false'
-npx @openai/codex-security patch "Security issue" --codex 'analytics.enabled=false'
-npx @openai/codex-security verify-fix "Security issue" --codex 'analytics.enabled=false'
+npx @bex-co/bex-security validate "Candidate finding" --codex 'analytics.enabled=false'
+npx @bex-co/bex-security patch "Security issue" --codex 'analytics.enabled=false'
+npx @bex-co/bex-security verify-fix "Security issue" --codex 'analytics.enabled=false'
 ```
 
 The same setting works for `scan` and `bulk-scan`. An explicit setting is
@@ -1138,7 +1198,7 @@ restrictions.
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default team and project for completed-scan publication.                                                  |
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Personal API key for Linear patching and direct publication.                                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; `debug` enables verbose diagnostics.                                                            |
-| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                               |
+| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                      |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Private scan-history, workbench, and default artifact directory.                                          |
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Trusted project file for `scan`, `bulk-scan`, `scan-components`, and `info`; `-c` wins. Unset by default. |
 | `CODEX_HOME`                                                                | Ambient Codex home for file-based sign-in and default state; defaults to `~/.codex`.                      |
@@ -1158,6 +1218,24 @@ Python lookup order: `--python` (on `scan`, `bulk-scan`, or `export`) or SDK
 `pythonPath`, then `PYTHON`, the managed Codex runtime, and `python3` or `python`
 on `PATH` (`py` also works on Windows). `CODEX_SECURITY_STATE_DIR` overrides
 `CODEX_HOME` for state storage. Keep state and results outside the repository.
+
+### Troubleshooting
+
+By default, scans show progress, state transitions, warnings, and summaries.
+Add `--verbose` or set
+`CODEX_SECURITY_LOG_LEVEL=debug` to include lifecycle, configuration, retry,
+and worker diagnostics on stderr. `LOG_LEVEL=debug` is the fallback when
+`CODEX_SECURITY_LOG_LEVEL` is unset or blank.
+
+```bash
+npx @bex-co/bex-security scan . --verbose
+```
+
+Codex Security preserves diagnostic text, including credential-shaped values,
+in CLI output, stored failures, publication receipts, and patch-risk summaries.
+Verbosity controls the amount of diagnostic detail. Native Codex and upstream
+SDK output may already have been redacted before reaching Codex Security.
+Review output and artifacts for sensitive information before sharing them.
 
 ### Progress and cost
 
@@ -1187,6 +1265,8 @@ means an upper estimate is unavailable, including models without verified
 long-context rates. `cost.pricing` records the price source, verification date,
 processing tier, short-context rates, and verified long-context rates when known.
 Models without known short-context prices still have no cost estimate.
+GPT-6 Astra, GPT-6.1 Sol, and GPT-6 Luna have verified standard prices for cost
+estimates and `--max-cost` limits.
 
 For compatibility, `cacheWriteInputTokens` remains the reported token subtotal.
 `cacheWriteInputTokensReported: false` means at least one included usage record
@@ -1441,7 +1521,7 @@ Repeat `--validation-prompt-file` on reruns.
 Choose completed scans from local history:
 
 ```bash
-npx @openai/codex-security publish scan --to cloud --dry-run --json
+npx @bex-co/bex-security publish scan --to cloud --dry-run --json
 ```
 
 Press Space to select scans, then Enter to submit. Nothing is preselected.
@@ -1450,7 +1530,7 @@ For scripts, repeat `--scan` with saved IDs or unique prefixes of at least
 eight characters:
 
 ```bash
-npx @openai/codex-security publish scan \
+npx @bex-co/bex-security publish scan \
   --scan SCAN_ID_A --scan SCAN_ID_B \
   --to cloud --dry-run --json
 ```
@@ -1472,7 +1552,7 @@ Cloud publication rejects automatic and keyring storage, even if an
 For CSV input, use an export from `codex-security export --export-format csv`:
 
 ```bash
-npx @openai/codex-security publish scan --to cloud \
+npx @bex-co/bex-security publish scan --to cloud \
   --csv /path/outside/repository/findings.csv
 ```
 
@@ -1691,7 +1771,7 @@ import {
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   publishScan,
-} from "@openai/codex-security";
+} from "@bex-co/bex-security";
 
 // Supplied reports from any source: returns an assessment without writing files.
 const classification = await classifySeverity(findings, {
@@ -1734,6 +1814,53 @@ JSON exports from versions without database checkpoints must be reclassified
 once before they can be reused.
 Pass `signal` to cancel any classification operation. Keep human overrides in the
 calling workflow or issue tracker; assessments remain separate recommendations.
+
+### Suggest finding owners
+
+Suggest contributors who can fix findings in a local Git repository:
+
+```bash
+npx @bex-co/bex-security suggest-owners findings.json --source-root /path/to/repo --json > owners.json
+```
+
+The input is a Codex Security findings document or a JSON object containing a
+`findings` array, such as the output of `export --export-format json`. The source
+root defaults to the current directory. The command reads committed `HEAD`,
+source around each finding location, blame for the affected lines, and file
+history reachable from that commit. It does not read uncommitted source or change
+findings, files, or ticket assignments.
+
+The checkout must own its Git references and objects. Linked worktrees and bound
+separate Git directories are supported. Checkouts that borrow external object
+stores, including `git clone --shared`, are rejected; use an independent clone.
+
+Each result preserves the finding and occurrence IDs and has status `identified`,
+`abstained`, or `error`. Identified results include an observed Git author name
+and email, a reason, and checked Git citations. Missing source or unclear
+ownership produces an abstention. Git identities do not establish active
+employment or an issue tracker account. Match accounts before assigning tickets.
+Use a checkout that matches the findings; otherwise their line ranges may be stale.
+
+The command uses existing Codex credentials and the Codex Security default model and effort.
+Use `--model` and `--effort` to override them. Model selection runs with tools and
+network access disabled. Exit code `0` includes successful recommendations and
+abstentions; `2` means invalid input or at least one failed recommendation. A
+per-finding failure retains the other results in the report. Cancellation uses
+exit code `130` for SIGINT or `143` for SIGTERM.
+
+The SDK accepts finding IDs, titles, summaries, and source locations directly:
+
+```ts
+import { suggestOwners } from "@bex-co/bex-security";
+
+const owners = await suggestOwners("/path/to/repo", result.findings, {
+  reasoningEffort: "high",
+});
+```
+
+SDK inputs may include `sourceRevision`. If it differs from `HEAD`, the collector
+ignores the old line ranges and reports the mismatch. Reports record the analyzed
+revision, model, effort, and limitations; they remain separate from scan artifacts.
 
 ### Feedback
 
@@ -1801,8 +1928,8 @@ Replacement files resolve from the invocation directory. Custom validation keeps
 After the CLI process or host stops unexpectedly, find the scan and rejoin it:
 
 ```bash
-npx @openai/codex-security scans list --scan-root /path/to/security-scans
-npx @openai/codex-security scans resume SCAN_ID
+npx @bex-co/bex-security scans list --scan-root /path/to/security-scans
+npx @bex-co/bex-security scans resume SCAN_ID
 ```
 
 The scan must still be `running`, with its original checkout, output directory,
@@ -1846,7 +1973,16 @@ retaining stable finding identities. Ctrl-C keeps comparisons already saved.
 Only high-confidence duplicates are grouped; uncertain and independently
 related findings stay separate. Matching preserves triage and sealed artifacts.
 
-Codex is called only when a new decision is needed, using existing authentication.
+Codex runs only for new matching decisions, using existing authentication.
+`scans match` and `scans compare` accept `--model` and `--effort`; the defaults
+are Codex's configured model and `medium` effort. Cached matches are reused
+even when these flags change. To recompute all matches:
+
+```bash
+npx @bex-co/bex-security scans match --all --force \
+  --model gpt-6.1-sol --effort high
+```
+
 Scans without sealed artifacts are skipped, but their confirmed links can still
 be reused. Older custom plugins save confirmed and uncertain matches; use the
 bundled plugin for related links and large comparisons.
@@ -1855,10 +1991,7 @@ SDK callers can compare findings without saving a workbench comparison:
 
 ```ts
 import { readFile } from "node:fs/promises";
-import {
-  matchScanFindings,
-  type FindingsDocument,
-} from "@openai/codex-security";
+import { matchScanFindings, type FindingsDocument } from "@bex-co/bex-security";
 
 const before = JSON.parse(
   await readFile("/path/to/earlier-scan/findings.json", "utf8"),
@@ -1930,6 +2063,46 @@ before writing, accepts `--output -` for stdout, and can use
 `--source-root /path/to/repository` with SARIF to add source-line fingerprints.
 Run `npx @bex-co/bex-security export --help` for all export options.
 
+`install-hook` adds an optional local Git pre-commit check for staged and
+unstaged changes. It's advisory; use a required CI check to enforce a passing
+scan. When Git runs the hook, it blocks commits if the scan can't finish or
+finds an issue at or above the threshold (`high` by default). Set it when
+installing with `--fail-on-severity`. The installer respects `core.hooksPath`
+and leaves custom hooks alone.
+
+We recommend installing the CLI outside the repository and running that copy
+directly. For a global installation:
+
+```bash
+npm install --global @bex-co/bex-security
+```
+
+If the repository also has a local copy, `npx` may run it instead.
+
+Before installing or replacing a hook, run
+`git -C /path/to/repository rev-parse --git-path hooks/pre-commit`. Git may
+return a path relative to `/path/to/repository`. Check the hook, if it exists,
+and the path to its directory for symlinks or shared locations. Leave custom,
+linked, shared, or unverified hooks alone. If they need to change, contact the
+owner or use a required CI check. Check older generated hooks too; the installer
+can update them automatically.
+
+If the hooks directory belongs only to this repository and there is no hook,
+run the global CLI from outside the repository:
+
+```bash
+codex-security install-hook /path/to/repository
+```
+
+To migrate a hook, confirm it's a regular file used only by this repository
+and contains only the generated Codex Security command. Keep its severity.
+The installer can update older hooks that invoke `npx` if you use the same
+severity. Newer hooks store absolute paths to Node and the CLI. If either path
+changes, the installer won't replace the hook: back it up, remove it, and rerun
+`codex-security install-hook /path/to/repository` with the same
+`--fail-on-severity` value (default: `high`). If reinstallation fails, restore
+the backup and verify the hook before relying on it.
+
 ### Import alerts from the CLI
 
 `import github OWNER/REPO` reads open code scanning alerts from the default
@@ -1940,12 +2113,12 @@ branch. Repeat `--github-alert NUMBER` for exact alerts. Filter with
 
 ```bash
 # Import all open alerts, or a selected subset, as complete JSON.
-npx @openai/codex-security import github example/repository --format json \
+npx @bex-co/bex-security import github example/repository --format json \
   > /path/outside/repository/github-alerts.json
-npx @openai/codex-security import github example/repository \
+npx @bex-co/bex-security import github example/repository \
   --github-alert 12 --github-alert 18 --format json
 # Run from the corresponding local repository; imported contents are data.
-npx @openai/codex-security validate /path/outside/repository/github-alerts.json
+npx @bex-co/bex-security validate /path/outside/repository/github-alerts.json
 ```
 
 Import is read-only and returns an array (`[]` when empty). `--json` aliases
@@ -1958,6 +2131,26 @@ Use the SDK loop for a disposition per alert.
 files or literal text and work in the current directory. Pass a saved finding
 or occurrence ID to `patch` to use its original repository.
 
+Add `--validation-prompt-file PATH` to supply custom dynamic validation
+instructions, using the same UTF-8 prompt file format as `scan`. The patch task
+uses these instructions to set up the environment, build or start the application,
+exercise the fix, check legitimate behavior, and clean up. Include the commands,
+authorized targets, expected results, and cleanup steps for your environment.
+The task must report validation evidence or explain which checks failed or could
+not run before claiming the patch is fixed or verified.
+
+```bash
+npx @bex-co/bex-security patch OCCURRENCE_ID --validation-prompt-file validation.md
+npx @bex-co/bex-security patch issues.md --validation-prompt-file validation.md
+```
+
+The flag works with saved findings, issue text/files, and Linear inputs. Relative
+prompt paths resolve from the directory where you invoke the CLI, including when
+the saved finding belongs to another repository. The file is read once before
+patching; missing, empty, or non-regular files fail before the patch task starts.
+Without the flag, the usual fix-finding verification applies. The flag does not
+change sandbox permissions and cannot be combined with `--resume-pr`.
+
 Add `--assess-patch-risk` to a `patch` command to run the bundled patch-risk
 assessment skill once on the completed patch. The assessment is advisory and
 does not change the patch or its merge state. Human-readable commands print the
@@ -1967,17 +2160,18 @@ the draft pull request or merge request body includes only the concise Markdown
 summary from the assessment; the validated JSON remains in the command result.
 
 ```bash
-npx @openai/codex-security validate "Possible SQL injection" --effort high
-npx @openai/codex-security patch OCCURRENCE_ID
-npx @openai/codex-security patch --scan SCAN_ID --severity high --json
-npx @openai/codex-security patch --scan SCAN_ID --severity high --create-pr
-npx @openai/codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
-npx @openai/codex-security patch --linear-issue SEC-123 --assess-patch-risk --create-pr
+npx @bex-co/bex-security validate "Possible SQL injection" --effort high
+npx @bex-co/bex-security patch OCCURRENCE_ID
+npx @bex-co/bex-security patch --scan SCAN_ID --severity high --json
+npx @bex-co/bex-security patch --scan SCAN_ID --severity high --create-pr
+npx @bex-co/bex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
+npx @bex-co/bex-security patch --linear-issue SEC-123 --assess-patch-risk --create-pr
 ```
 
-`--scan latest` selects the current repository's latest scan. Patch commands
-support `--json`, including literal-text and file inputs. Change
-the model with `--codex 'model="gpt-5.6-sol"'` or effort with `--effort high`.
+`--scan latest` selects the current repository's latest completed scan. Patch
+commands support `--json`, including literal-text and file inputs. Change
+the model with `--model gpt-6.1-sol` or effort with `--effort high`.
+The existing `--codex 'model="..."'` syntax is also supported.
 Each finding gets its own saved Codex desktop task.
 
 Before patching, the CLI runs a command with the task's sandbox policy. If the
@@ -1991,7 +2185,7 @@ Saved findings still require a verified result from the patch task.
 For a controlled container that provides its own isolation, explicitly opt in:
 
 ```bash
-npx @openai/codex-security patch "Security issue" --external-sandbox --json
+npx @bex-co/bex-security patch "Security issue" --external-sandbox --json
 ```
 
 `--external-sandbox` defaults to false. It uses Codex's external-sandbox policy
@@ -2005,6 +2199,8 @@ its read-only Codex sandbox.
 to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
+Patching shows each finding's position, elapsed time, and live Codex activity.
+Progress goes to stderr; completed results stay in the terminal history.
 
 `--create-pr` commits generated patch files and opens a draft GitHub pull request
 with `gh` or a draft GitLab merge request with `glab`. Install and authenticate
@@ -2016,7 +2212,7 @@ aliases are also accepted, in that order after `GITLAB_HOST`. Other hosts retain
 the GitHub workflow.
 
 ```bash
-GITLAB_HOST=gitlab.example.com npx @openai/codex-security patch --scan SCAN_ID --create-pr
+GITLAB_HOST=gitlab.example.com npx @bex-co/bex-security patch --scan SCAN_ID --create-pr
 ```
 
 Both providers use the existing `pullRequest: { branch, url }` JSON result.
@@ -2108,6 +2304,12 @@ cancels, resumes, publishes, edits, or deduplicates anything.
 
 The dashboard opens on Findings, followed by Duplicate groups. Both views
 support search, repository filtering, sorting, pagination, and record details.
+Click any column header to sort all matching records; click it again to reverse
+the order. The arrow marks the active column and direction. Changing the sort
+returns to the first page, and automatic refreshes keep the selected order.
+By default, findings sort by last update descending, then severity descending,
+then ID ascending to break ties. Groups sort by last update descending and ID
+ascending.
 Findings show stored content and links to their duplicate groups. Groups link
 back to their member findings, preserving separate overlapping groups and the
 original finding records.
@@ -2124,7 +2326,10 @@ repository choices, a page of records, and optional selected-record details:
 
 - `view`: `findings` (default) or `groups`.
 - `query`, `repository`: optional search text and exact repository ID.
-- `sort`: `activity` (default; most recently updated first) or `newest`.
+- `sort`: `activity` (default; last update), `newest` (created), `title`,
+  `repository`, `severity` (findings only), or `members` (groups only).
+- `direction`: `asc` or `desc` (default). Text sorts alphabetically without
+  case sensitivity, severity by level, and member counts numerically.
 - `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
 - `id`: optional exact record ID to include in `detail`; unknown IDs return
   `detail: null` without hiding the list.
@@ -2236,7 +2441,7 @@ unchanged. Upload failures and incomplete receipts fail the command; uploads
 are not automatically retried because a lost response may have been committed.
 
 ```typescript
-import { publishScanToCustom } from "@openai/codex-security";
+import { publishScanToCustom } from "@bex-co/bex-security";
 
 const receipt = await publishScanToCustom("/path/to/completed-scan", {
   findingsUrl: "http://localhost:3000",
@@ -2251,7 +2456,7 @@ console.log(receipt.repositoryId, receipt.findingIds);
 Publish the scan with `--to custom` (or import it through the bulk API with its
 `repositoryId`) before deduplicating. The
 workflow reads a completed saved scan, queries candidates by finding ID, and
-runs Luna and Sol in the calling SDK/CLI process. Once all reviews succeed,
+runs Luna and Sol in the calling SDK/CLI process. Once all reviews finish,
 it posts accepted groups to the service. It does not re-upload findings or
 change scan artifacts.
 
@@ -2272,7 +2477,14 @@ has finished and none voted `DISTINCT`. It can run while unrelated Luna
 screenings continue. Results are combined in input order so completion timing
 does not change the groups.
 
-If a job fails after its retries, queued jobs stop and already running jobs
+An explicit model refusal keeps the affected pairs separate and allows unrelated
+reviews to continue. It is recorded as `NO_DECISION`, not a reviewed `DISTINCT`
+verdict. A screening refusal applies to every anchor/candidate pair in that
+screening; a pair-review refusal applies only to its assigned pair. Neither pair
+can be merged indirectly through other findings. Recognized policy errors and
+explicit refusal responses are not retried or sent to another model.
+
+If another kind of job fails after its retries, queued jobs stop and already running jobs
 finish before the command reports the failure. No groups are posted from an
 incomplete review. To retain completed reviews across runs, use a
 `--workflow-id` as described below.
@@ -2289,7 +2501,7 @@ prefix, or `latest` for the current repository. The saved scan must be complete
 and its sealed artifacts must be available.
 
 ```typescript
-import { deduplicateScan } from "@openai/codex-security";
+import { deduplicateScan } from "@bex-co/bex-security";
 
 const result = await deduplicateScan("scan_example_001", {
   findingsUrl: "http://127.0.0.1:3000",
@@ -2304,7 +2516,7 @@ For a complete, sealed scan directory that is not registered in local scan
 history, provide the repository checkout separately:
 
 ```typescript
-import { deduplicateScanDirectory } from "@openai/codex-security";
+import { deduplicateScanDirectory } from "@bex-co/bex-security";
 
 const result = await deduplicateScanDirectory("/path/to/completed-scan", {
   repository: "/path/to/repository",
@@ -2335,6 +2547,31 @@ members of an accepted group, with its canonical finding first. The canonical
 has the highest reported severity; ties use finding ID. Results do not delete,
 merge, or change stored finding documents. Accepted groups are saved as durable
 associations in the service before `deduplicationStatus` becomes `completed`.
+
+When any review is refused, the result instead has
+`deduplicationStatus: "completed_with_refusals"` and a `refusals` array. Each
+entry contains `decision: "NO_DECISION"`, `stage`, `model`, `findingIds`, and
+`reason`. For screening, the first finding ID is the anchor and the remaining
+IDs are its candidates. The CLI logs each refusal to stderr and exits
+successfully after saving the accepted groups. SDK callers can inspect and log
+the same structured entries. Findings retained because of a refusal are not
+confirmed unique. Successful runs without refusals keep their existing output
+shape. No command, flag, or default changes are required.
+
+This behavior applies to post-scan Luna/Sol deduplication. Deep Scan's internal
+reducer uses a separate workflow.
+
+### Host-provided records deduplication
+
+`codex-security dedupe --records` accepts a versioned JSON-RPC run over stdin
+and emits serial `review.run` requests on stdout for a host-provided model
+backend. It requires no saved scan or Findings API and performs no local model
+execution or persistence. The SDK exposes `deduplicateRecords(input,
+{ reviewRunner, signal })`. The input contains original observations and explicit candidate links. Results
+contain groups of observation IDs and unresolved observations.
+
+See the [records protocol and Python fake-host example](docs/dedupe-records.md)
+for the complete input, review contract, cancellation, and persistence rules.
 
 ### Stored duplicate groups
 
@@ -2437,9 +2674,15 @@ exponential backoff with jitter; HTTP retries honor `Retry-After`. Waiting to re
 occupies the job's concurrency slot.
 
 Cancellation, authentication or configuration errors, permanent HTTP errors, and
-required-source-access blockers are not retried. Exhausted retries fail deduplication;
+required-source-access blockers are not retried. Model refusals continue with
+`NO_DECISION` as described above. Other exhausted retries fail deduplication;
 invalid or unfinished reviews are not cached. Completed checkpoints remain
 available when the workflow resumes.
+
+Refusals are not saved as validated review checkpoints. A completed workflow
+retains its final `completed_with_refusals` result, including all refusal entries,
+and returns it on subsequent calls. To attempt those reviews again after
+resolving the refusal, run dedupe without that workflow ID or with a new one.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,
@@ -2663,7 +2906,7 @@ migrated database.
 With Node.js and Python 3 installed:
 
 ```bash
-npm install -g @openai/codex-security
+npm install -g @bex-co/bex-security
 CODEX_SECURITY_STATE_DIR="$HOME/.codex-security-findings" codex-security serve --port 3000
 ```
 
@@ -2710,7 +2953,7 @@ embedder and store, so either can be replaced independently.
 
 For renewable embeddings credentials, import `OpenAiFindingEmbedder`,
 `SqliteFindingsStore`, and `startFindingsServer` from
-`@openai/codex-security/server`. The embedder's first argument accepts a static
+`@bex-co/bex-security/server`. The embedder's first argument accepts a static
 key or `() => string | Promise<string>`. It calls the callback before every
 HTTP batch, including subsequent calls to `embed`; callers own token acquisition.
 Pass `fetch` as the second argument and
@@ -2752,8 +2995,9 @@ Compose accepts `CODEX_SECURITY_IMAGE`, `CODEX_SECURITY_USER`,
 `CODEX_SECURITY_SECCOMP`, `CODEX_SECURITY_CSV`, `CODEX_SECURITY_RESULTS`, and
 `CODEX_SECURITY_STATE` for the image, user, seccomp profile, and mounts.
 
+Codex 0.156.1 requires Bubblewrap for filesystem-restricted execution on Linux.
 On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
-can install the optional AppArmor profile:
+must install the AppArmor profile and use the Compose override:
 
 ```bash
 sudo install -m 0644 docker/codex-security.apparmor /etc/apparmor.d/codex-security-container
@@ -2762,7 +3006,9 @@ docker compose -f compose.yaml -f compose.apparmor.yaml run --rm codex-security
 ```
 
 The override keeps the nonroot user, dropped capabilities, no-new-privileges,
-and seccomp policy. Other Docker hosts don't need it.
+and seccomp policy. It enables the nested namespaces required by Bubblewrap.
+The legacy Landlock fallback is no longer supported for these scans. Other
+Docker hosts that permit nested user namespaces do not need this override.
 
 ## Local security model
 

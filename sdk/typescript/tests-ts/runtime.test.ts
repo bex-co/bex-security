@@ -1,10 +1,11 @@
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
-import { EventEmitter, once } from "node:events";
+import { EventEmitter } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
+  cp,
   link,
   lstat,
   mkdir,
@@ -23,6 +24,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -74,6 +76,7 @@ import {
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   preserveCodexSecurityPluginRegistration,
+  environmentWithGit,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -85,6 +88,7 @@ import {
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
+import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { childProcessTimeout } from "./support/process-timeouts.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -1265,6 +1269,68 @@ describe("plugin runtime preparation", () => {
     );
   });
 
+  test("extracts ZIP directories and preserves executable file permissions", async () => {
+    const root = await temporaryDirectory();
+    const archive = join(root, "plugin.zip");
+    await writeFile(
+      archive,
+      zipSync({
+        "__MACOSX/._release": strToU8("metadata"),
+        "release/.codex-plugin/plugin.json": strToU8(
+          JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+        ),
+        "release/unix-directory": [
+          new Uint8Array(),
+          { os: 3, attrs: 0o40700 << 16 },
+        ],
+        "release/dos-directory": [new Uint8Array(), { os: 0, attrs: 16 }],
+        "release/scripts/helper": [
+          strToU8("#!/bin/sh\n"),
+          { os: 3, attrs: 0o100755 << 16 },
+        ],
+      }),
+    );
+    const extracted = await extractPluginZip(archive, join(root, "extracted"));
+    expect((await stat(join(extracted, "unix-directory"))).isDirectory()).toBe(
+      true,
+    );
+    expect((await stat(join(extracted, "dos-directory"))).isDirectory()).toBe(
+      true,
+    );
+    expect(await readFile(join(extracted, "scripts/helper"), "utf8")).toBe(
+      "#!/bin/sh\n",
+    );
+    expect(existsSync(join(root, "extracted", "__MACOSX"))).toBe(false);
+    if (process.platform !== "win32") {
+      expect((await stat(join(extracted, "scripts/helper"))).mode & 0o777).toBe(
+        0o755 & ~process.umask(),
+      );
+    }
+  });
+
+  test("rejects ZIP symlinks before writing through them and cleans staging", async () => {
+    const root = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const target = join(outside, "target.txt");
+    await writeFile(target, "unchanged");
+    const archive = join(root, "plugin.zip");
+    await writeFile(
+      archive,
+      zipSync({
+        "release/.codex-plugin/plugin.json": strToU8(
+          JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+        ),
+        "release/link": [strToU8(outside), { os: 3, attrs: 0o120777 << 16 }],
+        "release/link/target.txt": strToU8("overwritten"),
+      }),
+    );
+    await expect(
+      extractPluginZip(archive, join(root, "extracted")),
+    ).rejects.toThrow("unsafe path");
+    expect(await readFile(target, "utf8")).toBe("unchanged");
+    expect(await readdir(root)).toEqual(["plugin.zip"]);
+  });
+
   test("honors cancellation while preparing a plugin ZIP", async () => {
     const root = await temporaryDirectory();
     const archive = join(root, "plugin.zip");
@@ -1631,6 +1697,147 @@ describe("plugin runtime preparation", () => {
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
     ]);
+  });
+
+  describe("installed plugin reuse", () => {
+    async function fixture() {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = join(home, "sdk-marketplace");
+      const staged = join(marketplace, "plugins", "codex-security");
+      const installed = join(home, "installed", "1.2.3");
+      const record = join(marketplace, "installed-plugin.json");
+      const configuration = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
+      const calls: string[][] = [];
+      await mkdir(home);
+      const bootstrap = () =>
+        bootstrapPlugin(home, selected, {
+          codexCommand: { command: "/codex" },
+          runCodex: async (_command, args) => {
+            calls.push([...args]);
+            if (args[1] === "marketplace") {
+              await writeFile(join(home, "config.toml"), configuration);
+              return "";
+            }
+            await rm(installed, { recursive: true, force: true });
+            await cp(staged, installed, { recursive: true });
+            await writeFile(
+              join(home, "config.toml"),
+              `${configuration}\n[plugins."codex-security@codex-security-sdk"]\nenabled = true\n`,
+            );
+            return JSON.stringify({
+              installedPath: installed,
+              version: "1.2.3",
+            });
+          },
+        });
+      await bootstrap();
+      return { selected, home, staged, installed, record, calls, bootstrap };
+    }
+
+    test("preserves generated installed files during reuse", async () => {
+      const { installed, calls, bootstrap } = await fixture();
+      const generated = join(installed, "scripts", "__pycache__", "helper.pyc");
+      await mkdir(dirname(generated));
+      await writeFile(generated, "generated cache");
+
+      expect((await bootstrap()).installedRoot).toBe(installed);
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(1);
+      expect(await readFile(generated, "utf8")).toBe("generated cache");
+    });
+
+    test.each(["changed", "added", "removed"] as const)(
+      "refreshes %s same-version source files",
+      async (change) => {
+        const { selected, staged, installed, bootstrap } = await fixture();
+        const name = change === "added" ? "added.py" : "helper.py";
+        const source = join(selected, "scripts", name);
+        if (change === "removed") {
+          await rm(source);
+        } else {
+          // Same length as the original helper, so byte comparison must detect it.
+          await writeFile(source, "print('no')\n");
+        }
+
+        await bootstrap();
+
+        for (const root of [staged, installed]) {
+          const path = join(root, "scripts", name);
+          if (change === "removed") {
+            expect(existsSync(path)).toBe(false);
+          } else {
+            expect(await readFile(path, "utf8")).toBe("print('no')\n");
+          }
+        }
+      },
+    );
+
+    testPosix("refreshes changed source executable permissions", async () => {
+      const { selected, staged, installed, bootstrap } = await fixture();
+      await chmod(join(selected, "scripts", "helper.py"), 0o750);
+
+      await bootstrap();
+
+      for (const root of [staged, installed]) {
+        expect(
+          (await stat(join(root, "scripts", "helper.py"))).mode & 0o111,
+        ).toBe(0o110);
+      }
+    });
+
+    test.each([
+      "missing file",
+      "changed file",
+      "missing record",
+      "invalid record",
+      "disabled plugin",
+      "missing registration",
+      "extra staged file",
+    ])("repairs %s before reusing the installation", async (damage) => {
+      const { home, staged, installed, record, calls, bootstrap } =
+        await fixture();
+      const helper = join(installed, "scripts", "helper.py");
+      switch (damage) {
+        case "missing file":
+          await rm(helper);
+          break;
+        case "changed file":
+          await writeFile(helper, "print('no')\n");
+          break;
+        case "missing record":
+          await rm(record);
+          break;
+        case "invalid record":
+          await writeFile(record, "{");
+          break;
+        case "disabled plugin": {
+          const config = await readFile(join(home, "config.toml"), "utf8");
+          await writeFile(
+            join(home, "config.toml"),
+            config.replace("enabled = true", "enabled = false"),
+          );
+          break;
+        }
+        case "missing registration":
+          await writeFile(join(home, "config.toml"), "");
+          break;
+        case "extra staged file":
+          await writeFile(join(staged, "stale.py"), "pass\n");
+          break;
+      }
+
+      await bootstrap();
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+      expect(await readFile(helper, "utf8")).toBe("print('ok')\n");
+      expect(existsSync(join(staged, "stale.py"))).toBe(false);
+      expect(JSON.parse(await readFile(record, "utf8"))).toEqual({
+        installedPath: installed,
+        version: "1.2.3",
+      });
+      await bootstrap();
+      expect(calls.filter((args) => args[1] === "add")).toHaveLength(2);
+    });
   });
 
   test("does not preserve a different marketplace when numeric identities collide", async () => {
@@ -3228,10 +3435,8 @@ describe("runtime directories and plugin Python boundary", () => {
             );
           }),
         ]);
-        const ended = once(first.stdout, "end");
         first.stdout.end();
         first.stderr.end();
-        await ended;
         first.exitCode = 2;
         first.emit("close", 2, null);
         await nextTurn();
@@ -3400,6 +3605,86 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(count).toBe(expected);
     expect(observed).toBe(expected);
   });
+
+  test.each(["queued", "chunked"] as const)(
+    "streams %s Windows credential descriptors through EOF",
+    async (kind) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `streams ${kind} Windows credential descriptors through EOF`,
+        )
+      ) {
+        return;
+      }
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        exitCode: null as number | null,
+        signalCode: null,
+        kill: () => true,
+      });
+      const originalSpawn = childProcess.spawn;
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: () => child,
+      }));
+      const expected =
+        kind === "queued"
+          ? Array.from({ length: 4096 }, (_, i) => `descriptor-${i}`)
+          : ["first", "café", "middle", "last"];
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const observed: string[] = [];
+      const outcome = streamWindowsCredentialAclDescriptors(
+        "synthetic-credential-inspector",
+        [],
+        async (descriptor) => {
+          observed.push(descriptor);
+          if (observed.length === 1) {
+            entered.resolve();
+            await release.promise;
+          }
+        },
+      );
+      try {
+        if (kind === "queued") {
+          // End with more queued lines than readline's watermark while the
+          // first asynchronous descriptor inspection is still pending.
+          child.stdout.end(`${expected.join("\n")}\n`);
+        } else {
+          child.stdout.write(
+            Buffer.concat([Buffer.from("first\r\ncaf"), Buffer.from([0xc3])]),
+          );
+        }
+        await entered.promise;
+        if (kind === "chunked") {
+          child.stdout.end(
+            Buffer.concat([
+              Buffer.from([0xa9]),
+              Buffer.from("\r\n\r\nmiddle\rlast"),
+            ]),
+          );
+        }
+        child.stderr.end();
+        child.exitCode = 0;
+        child.emit("close", 0, null);
+        await nextTurn();
+        expect(observed).toEqual([expected[0]!]);
+        release.resolve();
+        expect(await outcome).toBe(expected.length);
+        expect(observed).toEqual(expected);
+      } finally {
+        release.resolve();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        mock.module("node:child_process", () => ({
+          ...childProcess,
+          spawn: originalSpawn,
+        }));
+      }
+    },
+  );
 
   test("preserves Windows credential ACL subprocess failures while streaming", async () => {
     await expect(
@@ -4732,6 +5017,86 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test.each([
+    ["unbound", false],
+    ["bound", true],
+  ] as const)(
+    "selects workbench Git for the requested target (%s)",
+    async (_label, bound) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const untrustedBin = join(repository, "tools");
+      const launchHome = join(root, "home");
+      const hostBin = join(launchHome, "tools");
+      const pluginRoot = join(root, "plugin");
+      const marker = join(root, "repository-git-executed");
+      const git = Bun.which("git");
+      const python = await resolvePluginPython();
+      expect(git).not.toBeNull();
+      if (git === null) return;
+      const trustedGit = join(
+        hostBin,
+        process.platform === "win32" ? "git.exe" : "git",
+      );
+      await mkdir(untrustedBin, { recursive: true });
+      await mkdir(join(repository, ".git"));
+      await mkdir(hostBin, { recursive: true });
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      await symlink(await realpath(git), trustedGit);
+      await writeFile(
+        join(untrustedBin, basename(trustedGit)),
+        `#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import json, os, sys",
+          "from pathlib import Path",
+          `sys.path.insert(0, ${JSON.stringify(join(PLUGIN_ROOT, "scripts"))})`,
+          "from workbench_target import git_command",
+          "assert os.environ.get('GIT_SSH_COMMAND') == 'synthetic-ssh'",
+          "target = Path(sys.argv[1])",
+          "completed = git_command(target, '--version', text=True)",
+          "completed.check_returncode()",
+          "print(json.dumps({'git': completed.args[0], 'path': os.environ.get('PATH'), 'binding': os.environ.get('CODEX_SECURITY_GIT')}))",
+        ].join("\n"),
+      );
+      const currentDirectory = spyOn(process, "cwd").mockReturnValue(
+        launchHome,
+      );
+      try {
+        const environment = {
+          PATH: [untrustedBin, hostBin].join(delimiter),
+          GIT_SSH_COMMAND: "synthetic-ssh",
+        };
+        const result = await runWorkbench(
+          {
+            python,
+            pluginRoot,
+            environment: bound
+              ? environmentWithGit(
+                  environment,
+                  await inspectTrustedExecutable(
+                    "git",
+                    environment,
+                    repository,
+                  ),
+                )
+              : environment,
+          },
+          [repository],
+        );
+        expect(result["git"]).toBe(trustedGit);
+        expect(result["binding"]).toBe(bound ? trustedGit : null);
+        if (bound) expect(result["path"]).toBe(hostBin);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        currentDirectory.mockRestore();
+      }
+    },
+  );
+
+  test.each([
     ["legacy", "0.1.22", false, false, undefined],
     ["previous", "0.1.37", true, false, undefined],
     ["independent version", "1.0.0", true, false, undefined],
@@ -5774,21 +6139,74 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("resolves inherited Python names case-insensitively", async () => {
-    const interpreter =
+    const discovered =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(interpreter).not.toBeNull();
+    expect(discovered).not.toBeNull();
+    const interpreter = join(
+      await realpath(dirname(discovered!)),
+      basename(discovered!),
+    );
+    const repository = await temporaryDirectory();
 
     expect(
       await resolvePluginPython({
+        protectedRoot: repository,
         environment: {
           PATH: "",
-          Python: interpreter!,
+          Python: interpreter,
           ...(process.env["SystemRoot"] === undefined
             ? {}
             : { SystemRoot: process.env["SystemRoot"] }),
         },
       }),
-    ).toBe(await realpath(interpreter!));
+    ).toBe(interpreter);
+  });
+
+  test("binds the plugin environment to inspected Git", () => {
+    const unbound = { Path: join(tmpdir(), "operator-tools"), KEEP: "1" };
+    expect(environmentWithGit(unbound, undefined)).toEqual(unbound);
+    const environment = environmentWithGit(
+      {
+        Path: join(tmpdir(), "repository-bin"),
+        PATH: join(tmpdir(), "other-repository-bin"),
+        Git_Config_Count: "1",
+        GIT_DIR: join(tmpdir(), "repository", ".git"),
+        Codex_Security_Git: join(tmpdir(), "repository-bin", "git"),
+        PYTHONUTF8: "1",
+        PYTHON: "selected-python",
+        CODEX_CLI_PATH: "selected-codex",
+        TEST: "1",
+      },
+      {
+        executable: join(tmpdir(), "trusted-bin", "git"),
+        environment: {
+          PATH: join(tmpdir(), "trusted-bin"),
+          OPENAI_API_KEY: "unselected-synthetic-key",
+          TEST: "old-snapshot",
+        },
+      },
+    );
+
+    expect(environment).toEqual({
+      CODEX_SECURITY_GIT: join(tmpdir(), "trusted-bin", "git"),
+      CODEX_CLI_PATH: "selected-codex",
+      GIT_DIR: join(tmpdir(), "repository", ".git"),
+      Git_Config_Count: "1",
+      PATH: join(tmpdir(), "trusted-bin"),
+      PYTHON: "selected-python",
+      PYTHONUTF8: "1",
+      TEST: "1",
+    });
+    expect(
+      environmentWithGit(
+        { Path: join(tmpdir(), "repository-bin"), GIT_DIR: ".git" },
+        { executable: null, environment: { PATH: "" } },
+      ),
+    ).toEqual({
+      CODEX_SECURITY_GIT: "",
+      GIT_DIR: ".git",
+      PATH: "",
+    });
   });
 
   test.skipIf(process.platform !== "win32")(
@@ -5890,6 +6308,38 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow(PluginPythonUnavailableError);
   });
 
+  testPosix("preserves an explicit virtualenv Python launcher", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const systemBin = join(root, "system", "bin");
+    const virtualenvBin = join(root, "venv", "bin");
+    const systemPython = join(systemBin, "python3");
+    const virtualenvPython = join(virtualenvBin, "python");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(systemBin, { recursive: true }),
+      mkdir(virtualenvBin, { recursive: true }),
+    ]);
+    await writeFile(
+      systemPython,
+      '#!/bin/sh\ncase "$0" in */venv/bin/python) ;; *) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(systemPython, 0o700);
+    await symlink(systemPython, virtualenvPython);
+    const aliasedBin = join(root, "venv-bin-alias");
+    await symlink(virtualenvBin, aliasedBin, "dir");
+
+    for (const candidate of [virtualenvPython, join(aliasedBin, "python")]) {
+      await expect(
+        resolvePluginPython({
+          configuredPath: candidate,
+          environment: { PATH: "" },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(virtualenvPython);
+    }
+  });
+
   test.skipIf(process.platform !== "win32")(
     "uses a configured Windows Python path without the executable suffix",
     async () => {
@@ -5967,9 +6417,13 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const marker = join(root, "sitecustomize-executed");
-      const interpreter = Bun.which("python3");
-      expect(interpreter).not.toBeNull();
-      if (interpreter === null) return;
+      const discovered = Bun.which("python3");
+      expect(discovered).not.toBeNull();
+      if (discovered === null) return;
+      const interpreter = join(
+        await realpath(dirname(discovered)),
+        basename(discovered),
+      );
 
       await mkdir(repository);
       await writeFile(
@@ -5990,7 +6444,7 @@ describe("runtime directories and plugin Python boundary", () => {
           environment,
           protectedRoot: repository,
         }),
-      ).toBe(await realpath(interpreter));
+      ).toBe(interpreter);
       expect(existsSync(marker)).toBe(false);
     },
   );

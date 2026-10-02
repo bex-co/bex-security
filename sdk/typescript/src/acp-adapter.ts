@@ -1023,13 +1023,13 @@ const CODEX_DRIVER: AcpAgentDriver = {
       (options.config ?? {}) as JsonObject,
     );
     const modelProvider = config["model_provider"];
+    const codexPath =
+      options.codexPathOverride ?? options.env?.["CODEX_CLI_PATH"];
     return {
       ...options.env,
       CODEX_CONFIG: JSON.stringify(config),
       INITIAL_AGENT_MODE: sessionMode(threadOptions),
-      ...(options.codexPathOverride === undefined
-        ? {}
-        : { CODEX_PATH: options.codexPathOverride }),
+      ...(codexPath === undefined ? {} : { CODEX_PATH: codexPath }),
       ...(typeof modelProvider === "string"
         ? { MODEL_PROVIDER: modelProvider }
         : {}),

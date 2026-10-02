@@ -1162,11 +1162,14 @@ def _populate_unsealed_manifest_envelope(
     scan["completedAt"] = completion_binding["completedAt"]
     scan["producer"] = copy.deepcopy(completion_binding["producer"])
 
-    target = scan.get("target")
+    target = scan.setdefault("target", {})
     if isinstance(target, dict):
+        allowed_kinds = completion_binding["allowedTargetKinds"]
+        if len(allowed_kinds) == 1:
+            target.setdefault("kind", allowed_kinds[0])
         _populate_unsealed_target_binding(target, completion_binding["target"])
 
-    scope = scan.get("scope")
+    scope = scan.setdefault("scope", {})
     if isinstance(scope, dict):
         scope.update(copy.deepcopy(completion_binding["scope"]))
 
@@ -2679,6 +2682,8 @@ def _prepare_scan_finalization(
         else _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     )
     scan = _require_dict(manifest, "scan", "manifest")
+    if scan.get("sealedAt") is None and scan.get("artifacts") == []:
+        del scan["artifacts"]
     was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)

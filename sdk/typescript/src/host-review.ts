@@ -9,7 +9,7 @@ import {
   AuthenticationRequiredError,
   ConfigurationError,
   IncompleteScanError,
-  safeErrorMessage,
+  errorMessage,
 } from "./errors.js";
 import { pathIsWithin } from "./path-scope.js";
 import {
@@ -130,7 +130,7 @@ async function saveDiagnostic(
   } catch (error) {
     warn(
       options,
-      `Could not save host review diagnostic ${path}: ${safeErrorMessage(error)}`,
+      `Could not save host review diagnostic ${path}: ${errorMessage(error)}`,
     );
     return false;
   }
@@ -207,7 +207,7 @@ export async function runHostReviewAssignments(
     };
   } catch (error) {
     const missingFiles = inventory.filter((path) => !accepted.has(path));
-    const failure = safeErrorMessage(error);
+    const failure = errorMessage(error);
     const artifact = {
       schemaVersion: 1,
       status: options.signal.aborted ? "canceled" : "incomplete",
@@ -488,7 +488,7 @@ async function runAssignment(
       } catch (error) {
         attemptFailed = true;
         record.status = options.signal.aborted ? "canceled" : "failed";
-        record.failure = safeErrorMessage(error);
+        record.failure = errorMessage(error);
         result.lastFailure = record.failure;
         options.signal.throwIfAborted();
         const disposition = reviewFailureDisposition(error);

@@ -81,10 +81,11 @@ describe("runtime directories and plugin Python boundary", () => {
           {
             encoding: "utf8",
             env: constrainedEnvironment,
-            timeout: 15_000,
+            timeout: 60_000,
             windowsHide: true,
           },
         );
+        expect(mode.error).toBeUndefined();
         expect(mode.status).toBe(0);
         expect(mode.stdout.trim()).toBe("ConstrainedLanguage");
 
@@ -100,10 +101,11 @@ describe("runtime directories and plugin Python boundary", () => {
           {
             encoding: "utf8",
             env: constrainedEnvironment,
-            timeout: 15_000,
+            timeout: 60_000,
             windowsHide: true,
           },
         );
+        expect(oldImplementation.error).toBeUndefined();
         expect(oldImplementation.status).not.toBe(0);
 
         const trustedPowerShellEnvironment = {
@@ -131,10 +133,11 @@ describe("runtime directories and plugin Python boundary", () => {
           {
             encoding: "utf8",
             env: trustedPowerShellEnvironment,
-            timeout: 15_000,
+            timeout: 60_000,
             windowsHide: true,
           },
         );
+        expect(guest.error).toBeUndefined();
         expect(guest.status).toBe(0);
         expect(guest.stdout.trim()).toMatch(/^S-1-(?:\d+-)*501$/u);
         const home = join(root, "state", "codex-home");

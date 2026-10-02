@@ -17,7 +17,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
-import { CodexSecurityError, type ScanOptions } from "../src/index.js";
+import {
+  CodexSecurityError,
+  type JsonObject,
+  type ScanOptions,
+} from "../src/index.js";
 import {
   codexSecurityCredentialAllowsAmbientImport,
   prepareCodexSecurityCredentialHome,
@@ -465,11 +469,8 @@ describe("CLI authentication", () => {
     for (const [argv, selection] of [
       [["scan"], "chatgpt"],
       [["scan"], "api-key"],
-      [["scans", "rerun", "scan-original", "--verbose", "--json"], "chatgpt"],
-      [
-        ["scans", "rerun", "scan-original", "--verbose", "--format", "jsonl"],
-        "chatgpt",
-      ],
+      [["scans", "rerun", "scan-original", "--verbose"], "chatgpt"],
+      [["scans", "rerun", "scan-original", "--verbose"], "api-key"],
     ] as const) {
       const stderr = capture(true);
       let selected: ScanOptions["auth"];
@@ -586,6 +587,32 @@ describe("CLI authentication", () => {
         key: true,
       },
       {
+        argv: ["scans", "rerun", "scan-original", "--verbose", "--json"],
+        terminal: true,
+        stored: true,
+        key: true,
+      },
+      {
+        argv: ["scans", "rerun", "--format", "jsonl"],
+        terminal: true,
+        stored: true,
+        key: true,
+      },
+      {
+        argv: ["scans", "rerun", "scan-original", "--json"],
+        terminal: true,
+        stored: true,
+        key: true,
+        recipeAuth: "chatgpt" as const,
+      },
+      {
+        argv: ["scans", "rerun", "scan-original", "--json"],
+        terminal: true,
+        stored: true,
+        key: true,
+        recipeAuth: "api-key" as const,
+      },
+      {
         argv: ["scan", "--dry-run"],
         terminal: true,
         stored: true,
@@ -596,12 +623,14 @@ describe("CLI authentication", () => {
         terminal: true,
         stored: true,
         key: true,
+        expectedAuth: "chatgpt" as const,
       },
       {
         argv: ["scan", "--auth", "api-key"],
         terminal: true,
         stored: true,
         key: true,
+        expectedAuth: "api-key" as const,
       },
       { argv: ["scan"], terminal: false, stored: true, key: true },
       { argv: ["scan"], terminal: true, stored: false, key: true },
@@ -614,9 +643,11 @@ describe("CLI authentication", () => {
         inputInteractive: false,
       },
     ]) {
+      const stdout = capture();
       const stderr = capture(scenario.terminal);
       let selected: ScanOptions["auth"];
       let prompts = 0;
+      let discoveries = 0;
       const deps = dependencies({
         environment: scenario.key
           ? { OPENAI_API_KEY: "synthetic-private-key" }
@@ -624,8 +655,25 @@ describe("CLI authentication", () => {
         onTurn: (_repository, options) => {
           selected = (options as ScanOptions).auth;
         },
+        onWorkbench: (args): JsonObject =>
+          args[0] === "list-scans"
+            ? { scans: [{ scanId: "scan-original" }] }
+            : {
+                recipe: {
+                  repository: "/original/repository",
+                  target: { kind: "repository", paths: [] },
+                  mode: "standard",
+                  ...(scenario.recipeAuth === undefined
+                    ? {}
+                    : { auth: scenario.recipeAuth }),
+                  config: {},
+                },
+              },
       });
-      deps.hasStoredChatGPTSignIn = async () => scenario.stored;
+      deps.hasStoredChatGPTSignIn = async () => {
+        discoveries += 1;
+        return scenario.stored;
+      };
       deps.scanAuthenticationPrompt = {
         isInteractive: () => scenario.inputInteractive !== false,
         select: async <Value extends string>(
@@ -638,16 +686,17 @@ describe("CLI authentication", () => {
       };
 
       expect(
-        await main(scenario.argv, capture().stream, stderr.stream, deps),
+        await main(scenario.argv, stdout.stream, stderr.stream, deps),
       ).toBe(0);
       expect(prompts).toBe(0);
+      if (scenario.argv.includes("--json") || scenario.argv.includes("jsonl")) {
+        expect(discoveries).toBe(0);
+        expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+        expect(stderr.text()).not.toMatch(/\x1b\[/u);
+      }
       if (!scenario.argv.includes("--dry-run")) {
         expect(selected).toBe(
-          scenario.argv.includes("chatgpt")
-            ? "chatgpt"
-            : scenario.argv.includes("api-key")
-              ? "api-key"
-              : "auto",
+          scenario.recipeAuth ?? scenario.expectedAuth ?? "auto",
         );
       }
       expect(stderr.text()).not.toContain("synthetic-private-key");
@@ -932,7 +981,10 @@ describe("CLI authentication", () => {
             deps,
           ),
         ).toBe(2);
-        expect(stdout.text()).toBe("");
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          status: "failed",
+          code: "SCAN_FAILED",
+        });
         expect(stderr.text()).toContain("workspace-managed policies");
         expect(stderr.text()).toContain(
           "API key is selected for model authentication",
@@ -967,7 +1019,11 @@ describe("CLI authentication", () => {
       expect(
         await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message,
+      });
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
       expect(stderr.text()).not.toContain("npx @openai/codex-security logout");
@@ -1259,17 +1315,19 @@ describe("skill authentication", () => {
     },
   );
   test.each([
-    ["auto", false, undefined],
-    ["chatgpt", false, undefined],
-    ["chatgpt", true, undefined],
-    ["chatgpt", false, "synthetic"],
-    ["api-key", false, undefined],
-    ["api-key", true, undefined],
-    ["auto", false, "synthetic"],
-    ["api-key", false, "synthetic"],
+    ["auto", false, undefined, false],
+    ["chatgpt", false, undefined, false],
+    ["chatgpt", true, undefined, false],
+    ["chatgpt", false, "synthetic", false],
+    ["api-key", false, undefined, false],
+    ["api-key", true, undefined, false],
+    ["auto", false, "synthetic", false],
+    ["api-key", false, "synthetic", false],
+    ["api-key", false, "synthetic", true],
+    ["chatgpt", false, "synthetic", true],
   ] as const)(
-    "patch uses %s auth without replacing a saved login (failure: %p, provider: %s)",
-    async (auth, loginFailure, provider) => {
+    "patch uses %s auth without replacing a saved login (failure: %p, provider: %s, explicit: %p)",
+    async (auth, loginFailure, provider, explicitProvider) => {
       const repository = join(stateDirectory, "repository");
       await mkdir(repository);
       const ambientHome = join(stateDirectory, "ambient");
@@ -1304,7 +1362,14 @@ describe("skill authentication", () => {
           'forced_login_method = "api"',
         );
       }
-      if (provider !== undefined) {
+      const providerConfiguration = {
+        name: "Synthetic provider",
+        base_url: "https://example.test/v1",
+        wire_api: "responses",
+        env_key: "OPENAI_API_KEY",
+        requires_openai_auth: auth === "chatgpt",
+      };
+      if (provider !== undefined && !explicitProvider) {
         await writeFile(
           join(ambientHome, "config.toml"),
           [
@@ -1349,7 +1414,24 @@ describe("skill authentication", () => {
       };
       expect(
         await main(
-          ["patch", "Synthetic issue", "--auth", auth],
+          [
+            "patch",
+            "Synthetic issue",
+            "--auth",
+            auth,
+            ...(explicitProvider
+              ? [
+                  "--codex",
+                  `model_provider=${JSON.stringify(provider)}`,
+                  ...Object.entries(providerConfiguration).flatMap(
+                    ([key, value]) => [
+                      "--codex",
+                      `model_providers.${provider}.${key}=${JSON.stringify(value)}`,
+                    ],
+                  ),
+                ]
+              : []),
+          ],
           stdout.stream,
           stderr.stream,
           dependencies({
@@ -1390,7 +1472,7 @@ describe("skill authentication", () => {
         expect(
           requests.find((request) => request.method === "thread/start").params
             .modelProvider,
-        ).toBeUndefined();
+        ).toBe(explicitProvider ? provider : undefined);
       }
       expect(methods).toEqual([
         "initialize",
