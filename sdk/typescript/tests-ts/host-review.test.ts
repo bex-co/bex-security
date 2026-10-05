@@ -27,6 +27,7 @@ interface FakeTurn {
 }
 
 const VALIDATION = {
+  controlsChecked: ["a.ts:1 exports a constant only."],
   verdict: "rejected",
   severity: "informational",
   evidence: "a.ts:1 exports a constant only.",
@@ -47,6 +48,9 @@ function client(
         async runStreamed(input) {
           if (input.startsWith("Validate one candidate")) {
             if (validation instanceof Error) throw validation;
+            const response = Array.isArray(validation)
+              ? validation[validations % validation.length]
+              : validation;
             validations++;
             return {
               events: (async function* () {
@@ -56,11 +60,11 @@ function client(
                     id: "validation",
                     type: "agent_message",
                     text: JSON.stringify(
-                      validation === INCOMPLETE ? VALIDATION : validation,
+                      response === INCOMPLETE ? VALIDATION : response,
                     ),
                   },
                 };
-                if (validation !== INCOMPLETE)
+                if (response !== INCOMPLETE)
                   yield { type: "turn.completed", usage: null };
               })(),
             };
@@ -799,7 +803,7 @@ describe("host review failure handling", () => {
   for (const [execution, expectedAttempts] of [
     ["configuration", 1],
     ["notSubmitted", 2],
-    ["possiblySubmitted", 1],
+    ["possiblySubmitted", 2],
   ] as const) {
     test(`does not fan out ${execution} failures into smaller batches`, async () => {
       const value = await fixture();
@@ -893,7 +897,12 @@ describe("host candidate validation", () => {
         candidates: [{ path: "a.ts", hostValidation: null }],
       });
       expect(warnings).toEqual([
-        expect.stringContaining("Host validation of candidate 1 failed"),
+        expect.stringContaining(
+          "Host validation vote 1 for candidate 1 failed",
+        ),
+        expect.stringContaining(
+          "Host validation vote 2 for candidate 1 failed",
+        ),
       ]);
     } finally {
       await rm(value.root, { recursive: true, force: true });
@@ -920,6 +929,7 @@ describe("host candidate validation", () => {
         candidates: [{ path: "a.ts", hostValidation: null }],
       });
       expect(warnings).toEqual([
+        expect.stringContaining("Synthetic transport timeout"),
         expect.stringContaining("Synthetic transport timeout"),
       ]);
     } finally {
@@ -963,13 +973,14 @@ describe("host candidate validation", () => {
       });
       expect(warnings).toEqual([
         expect.stringContaining("ended before completion"),
+        expect.stringContaining("ended before completion"),
       ]);
     } finally {
       await rm(value.root, { recursive: true, force: true });
     }
   });
 
-  test("a candidate repeated by a retried assignment is validated once", async () => {
+  test("a candidate repeated by a retried assignment is validated once per vote", async () => {
     const value = await fixture();
     validations = 0;
     try {
@@ -980,8 +991,37 @@ describe("host candidate validation", () => {
           { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] },
         ]),
       });
-      expect(validations).toBe(1);
+      expect(validations).toBe(2);
       expect((await json(result.artifactPath)).candidates).toHaveLength(1);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps the most skeptical of the independent votes", async () => {
+    const value = await fixture();
+    validations = 0;
+    const confirmed = {
+      controlsChecked: ["a.ts:1 has no guard."],
+      verdict: "confirmed",
+      severity: "high",
+      evidence: "a.ts:1 is reachable.",
+    };
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        client: client(
+          value.repository,
+          [{ read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] }],
+          [confirmed, VALIDATION],
+        ),
+      });
+      const [candidate] = (await json(result.artifactPath)).candidates;
+      expect(candidate.hostValidation).toEqual(VALIDATION);
+      expect(candidate.hostValidations).toHaveLength(2);
+      expect(candidate.hostValidations).toEqual(
+        expect.arrayContaining([confirmed, VALIDATION]),
+      );
     } finally {
       await rm(value.root, { recursive: true, force: true });
     }

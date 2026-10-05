@@ -350,10 +350,11 @@ and Muse configuration paths remain unchanged. Retain the scan's agent data to
 restore its sessions; switching data directories does not migrate existing
 sessions. Native history traversal within a large scan still depends on Muse.
 
-Invalid model configuration stops review recovery immediately. Structured
-startup failures that confirm no submission receive at most two attempts;
-possibly submitted turns stop with their original error. Smaller-file recovery
-continues for incomplete read evidence, without relaxing coverage checks.
+Invalid model configuration stops review recovery immediately. Structured turn
+failures, whether or not the turn may have been submitted, receive at most two
+attempts of the same read-only assignment before the scan stops with the
+original error. Smaller-file recovery continues for incomplete read evidence,
+without relaxing coverage checks.
 
 Muse owns authentication and model selection. Bex passes its stdio security
 workbench through ACP and uses noninteractive approval handling for automated
