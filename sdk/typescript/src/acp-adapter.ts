@@ -558,8 +558,13 @@ export class AcpAgentThread {
 }
 
 function acpAgentFailure(error: unknown, agent: AcpAgentName): unknown {
+  const message = errorMessage(error);
+  const failure =
+    error instanceof Error && message !== error.message
+      ? new Error(message, { cause: error })
+      : error;
   const setup = acpAgentSetup(agent);
-  if (setup === null) return error;
+  if (setup === null) return failure;
   const value = record(error);
   if (value?.["code"] === "ENOENT") {
     return new Error(
@@ -567,7 +572,6 @@ function acpAgentFailure(error: unknown, agent: AcpAgentName): unknown {
       { cause: error },
     );
   }
-  const message = errorMessage(error);
   if (
     /not authenticated|authentication required|log in|login required/i.test(
       message,
@@ -580,7 +584,7 @@ function acpAgentFailure(error: unknown, agent: AcpAgentName): unknown {
       },
     );
   }
-  return error;
+  return failure;
 }
 
 function acpAgentSetup(agent: AcpAgentName): {
@@ -1569,5 +1573,11 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (!(error instanceof Error)) return String(error);
+  // ACP agents report turn failures such as usage limits as a generic
+  // "Internal error" whose upstream reason is only in the error data.
+  const detail = record(record(error)?.["data"])?.["message"];
+  return typeof detail === "string" && detail !== "" && detail !== error.message
+    ? `${error.message}: ${detail}`
+    : error.message;
 }

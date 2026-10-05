@@ -26,14 +26,47 @@ interface FakeTurn {
   noCompletion?: boolean;
 }
 
-function client(repository: string, turns: FakeTurn[]): HostReviewClient {
+const VALIDATION = {
+  verdict: "rejected",
+  severity: "informational",
+  evidence: "a.ts:1 exports a constant only.",
+};
+
+const INCOMPLETE = Symbol("incomplete validation turn");
+let validations = 0;
+
+function client(
+  repository: string,
+  turns: FakeTurn[],
+  validation: unknown = VALIDATION,
+): HostReviewClient {
   let next = 0;
   return {
     startThread() {
-      const turn = turns[next++] ?? { read: [], claimed: [] };
-      if (turn.startError) throw turn.startError;
       return {
-        async runStreamed() {
+        async runStreamed(input) {
+          if (input.startsWith("Validate one candidate")) {
+            if (validation instanceof Error) throw validation;
+            validations++;
+            return {
+              events: (async function* () {
+                yield {
+                  type: "item.completed",
+                  item: {
+                    id: "validation",
+                    type: "agent_message",
+                    text: JSON.stringify(
+                      validation === INCOMPLETE ? VALIDATION : validation,
+                    ),
+                  },
+                };
+                if (validation !== INCOMPLETE)
+                  yield { type: "turn.completed", usage: null };
+              })(),
+            };
+          }
+          const turn = turns[next++] ?? { read: [], claimed: [] };
+          if (turn.startError) throw turn.startError;
           async function* events() {
             if (turn.read.length > 0) {
               yield {
@@ -816,4 +849,141 @@ describe("host review failure handling", () => {
       }
     });
   }
+});
+
+describe("host candidate validation", () => {
+  test("records each candidate's refutation verdict in the review artifact", async () => {
+    const value = await fixture();
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        client: client(value.repository, [
+          { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] },
+        ]),
+      });
+      expect(await json(result.artifactPath)).toMatchObject({
+        candidates: [
+          {
+            title: "Candidate",
+            path: "a.ts",
+            hostValidation: VALIDATION,
+          },
+        ],
+      });
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("an invalid refutation leaves the candidate for the coordinator", async () => {
+    const value = await fixture();
+    const warnings: string[] = [];
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        client: client(
+          value.repository,
+          [{ read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] }],
+          { verdict: "maybe" },
+        ),
+        onWarning: (warning) => warnings.push(warning),
+      });
+      expect(result.filesReviewed).toBe(2);
+      expect(await json(result.artifactPath)).toMatchObject({
+        candidates: [{ path: "a.ts", hostValidation: null }],
+      });
+      expect(warnings).toEqual([
+        expect.stringContaining("Host validation of candidate 1 failed"),
+      ]);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a possibly submitted refutation failure does not stop the scan", async () => {
+    const value = await fixture();
+    const warnings: string[] = [];
+    const failure = Object.assign(new Error("Synthetic transport timeout"), {
+      data: { failure: { execution: "possiblySubmitted" } },
+    });
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        client: client(
+          value.repository,
+          [{ read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] }],
+          failure,
+        ),
+        onWarning: (warning) => warnings.push(warning),
+      });
+      expect(await json(result.artifactPath)).toMatchObject({
+        candidates: [{ path: "a.ts", hostValidation: null }],
+      });
+      expect(warnings).toEqual([
+        expect.stringContaining("Synthetic transport timeout"),
+      ]);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a configuration failure during refutation stops the scan", async () => {
+    const value = await fixture();
+    try {
+      await expect(
+        runHostReviewAssignments({
+          ...reviewOptions(value),
+          client: client(
+            value.repository,
+            [{ read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] }],
+            new ConfigurationError("Synthetic model is unavailable"),
+          ),
+        }),
+      ).rejects.toThrow("Synthetic model is unavailable");
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a refutation turn that ends before completion is not trusted", async () => {
+    const value = await fixture();
+    const warnings: string[] = [];
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        client: client(
+          value.repository,
+          [{ read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] }],
+          INCOMPLETE,
+        ),
+        onWarning: (warning) => warnings.push(warning),
+      });
+      expect(await json(result.artifactPath)).toMatchObject({
+        candidates: [{ path: "a.ts", hostValidation: null }],
+      });
+      expect(warnings).toEqual([
+        expect.stringContaining("ended before completion"),
+      ]);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a candidate repeated by a retried assignment is validated once", async () => {
+    const value = await fixture();
+    validations = 0;
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        client: client(value.repository, [
+          { read: ["a.ts"], claimed: ["a.ts", "b.ts"] },
+          { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] },
+        ]),
+      });
+      expect(validations).toBe(1);
+      expect((await json(result.artifactPath)).candidates).toHaveLength(1);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
 });

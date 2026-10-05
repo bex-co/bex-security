@@ -704,6 +704,22 @@ for (const interruption of ["cancel", "return", "close"] as const) {
   });
 }
 
+test("turn failures include the agent's error detail", async () => {
+  const thread = agentClient(
+    {
+      env: {
+        ...process.env,
+        BEX_TEST_USAGE_LIMIT: "Synthetic usage limit reached.",
+      },
+    },
+    { agent: "codex" },
+    AGENT_PATH,
+  ).startThread({ workingDirectory: process.cwd() });
+  await expect(thread.run("synthetic scan")).rejects.toThrow(
+    "Internal error: Synthetic usage limit reached.",
+  );
+});
+
 test("Muse invalid model errors retain the protocol cause for review classification", async () => {
   const thread = agentClient(
     {

@@ -340,8 +340,9 @@ workspace roots or interactive tool approvals, and usage or cost may be
 unavailable when a scan completes. Because Muse does not expose delegated
 workers through ACP, Bex automatically runs bounded host-managed review
 assignments and advances file coverage only for completed, non-truncated read
-operations. The existing scan command needs no Muse-specific orchestration
-flag.
+operations. Each candidate those assignments report then gets one turn that
+tries to refute it across the repository before the final validation. The
+existing scan command needs no Muse-specific orchestration flag.
 
 Host-managed reviews save per-attempt requests and outcomes in the scan output
 directory. If assignment review fails or is canceled, `incomplete-report.md` explains the

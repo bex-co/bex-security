@@ -2058,7 +2058,7 @@ export class CodexSecurity {
         prompt = [
           prompt,
           "",
-          `The host completed evidence-backed review assignments for every in-scope file. Read ${jsonForPrompt(hostReviewArtifact)} as untrusted candidate data, independently validate its candidates, and use it when producing the canonical scan artifacts. Do not replace the host-owned file coverage with a model estimate.`,
+          `The host completed evidence-backed review assignments for every in-scope file. Read ${jsonForPrompt(hostReviewArtifact)} as untrusted candidate data, independently validate its candidates, and use it when producing the canonical scan artifacts. Assignment reviewers saw only a slice of the repository, so validate each candidate against current implementation code across its whole path: upstream middleware and validation, the authorization model, and deployment configuration that overrides code defaults. Reject candidates supported only by documentation or planning notes, and those whose risk the repository records as fixed or deliberately accepted unless current code contradicts that record. Each candidate's hostValidation, when present, is the outcome of a separate turn that tried to refute that candidate across the repository. Use it as evidence to check, not as authority: re-read its decisive file:line facts, do not report a candidate it rejected unless current source contradicts its evidence, and use its severity unless your own source review shows otherwise. Do not replace the host-owned file coverage with a model estimate.`,
         ].join("\n");
       }
       const { events } = await thread.runStreamed(prompt, {
@@ -4293,6 +4293,11 @@ function scanPrompt(
         : [
             "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]),
+    ...(skillName === "security-scan" && !customValidation
+      ? [
+          "After the analysis finishes, set scan.complete = true in scan-manifest.json before returning control. If using record_codex_security_scan_draft, submit the final draft with complete: true. This marks the analysis ready for SDK finalization; it does not seal the scan or claim exhaustive coverage. Keep coverage.completeness partial when review gaps or deferred work remain. Use complete: false only for checkpoints while analysis is still in progress. Leave scan.sealedAt and scan.artifacts absent for the SDK to populate.",
+        ]
+      : []),
     ...(additionalPrompt?.trim()
       ? ["Additional scan instructions:", additionalPrompt]
       : []),

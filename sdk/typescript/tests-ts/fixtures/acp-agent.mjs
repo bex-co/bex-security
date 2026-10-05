@@ -228,6 +228,11 @@ const app = agent({ name: "bex-security-test-agent" })
           `prompt did not contain: ${process.env.BEX_TEST_EXPECT_PROMPT}`,
         );
       }
+      if (process.env.BEX_TEST_USAGE_LIMIT) {
+        throw RequestError.internalError({
+          message: process.env.BEX_TEST_USAGE_LIMIT,
+        });
+      }
       if (process.env.BEX_TEST_LATE_CONFIG) {
         configOptions = configOptions.map((option) =>
           option.category === "thought_level"

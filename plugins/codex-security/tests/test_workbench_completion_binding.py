@@ -598,6 +598,55 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
         assert coverage["mode"] == expected
 
 
+def test_cli_completion_requires_finished_analysis_but_allows_partial_coverage(
+    tmp_path: Path,
+) -> None:
+    state_dir, target, scan_dir = tmp_path / "state", tmp_path / "target", tmp_path / "scan"
+    target.mkdir()
+    registered = register_cli_scan(state_dir, target, scan_dir)
+    scan_id = registered["scanId"]
+    write_completed_contract(scan_dir, scan_id, target)
+    report_path = scan_dir / "report.md"
+    report_path.unlink()
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["complete"] = False
+    manifest_path.write_text(json.dumps(manifest))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["completeness"] = "partial"
+    coverage["deferred"] = [
+        {"id": "external-integration", "reason": "External integration was outside this review."}
+    ]
+    coverage_path.write_text(json.dumps(coverage))
+
+    rejected = run_workbench(
+        state_dir, "prepare-scan-completion", "--scan-id", scan_id, check=False
+    )
+    assert rejected["returncode"] != 0
+    assert "draft is incomplete" in rejected["stderr"]
+    assert json.loads(manifest_path.read_text())["scan"]["complete"] is False
+    assert not report_path.exists()
+
+    manifest["scan"]["complete"] = True
+    assert "sealedAt" not in manifest["scan"]
+    assert "artifacts" not in manifest["scan"]
+    manifest_path.write_text(json.dumps(manifest))
+    run_workbench(state_dir, "prepare-scan-completion", "--scan-id", scan_id)
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
+    sealed = json.loads(manifest_path.read_text())["scan"]
+    assert sealed["complete"] is True
+    assert sealed["sealedAt"]
+    assert sealed["artifacts"]
+    final_coverage = json.loads(coverage_path.read_text())
+    assert final_coverage["completeness"] == "partial"
+    assert final_coverage["deferred"] == coverage["deferred"]
+    assert report_path.is_file()
+
+
 @pytest.mark.parametrize("omit_metadata", [True, False])
 def test_completion_populates_workbench_owned_unsealed_envelope(
     tmp_path: Path, omit_metadata: bool

@@ -3024,6 +3024,9 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
     expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).toContain("scan.complete = true");
+    expect(prompt).toContain("complete: true");
+    expect(prompt).toContain("coverage.completeness partial");
     expect(prompt).toContain(
       "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
