@@ -32,6 +32,7 @@ import {
   ScanInterruptedError,
   VERSION,
 } from "../src/index.js";
+import { AuthenticationRequiredError } from "../src/errors.js";
 import {
   main,
   parseCodexOverrides,
@@ -4585,6 +4586,30 @@ describe("CLI", () => {
       expect(stderr.text()).toContain(expected);
       expect(stderr.text()).not.toContain("org-private");
     }
+  });
+
+  test("keeps an ACP agent's own sign-in advice", async () => {
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new AuthenticationRequiredError(
+          "Authentication required\nRun `muse login` and retry the scan.",
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--agent", "muse"],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("Run `muse login` and retry the scan.");
   });
 
   test("preserves diagnostic text in underlying network errors", async () => {

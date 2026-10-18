@@ -754,6 +754,10 @@ describe("CodexSecurity orchestration", () => {
     expect(classifyConnectionFailure("401 invalid API key")).toBe(
       "unauthorized",
     );
+    // ACP agents report a stale stored login as an authRequired error.
+    expect(classifyConnectionFailure("Authentication required")).toBe(
+      "unauthorized",
+    );
     expect(classifyConnectionFailure("403 model access denied")).toBe(
       "forbidden",
     );

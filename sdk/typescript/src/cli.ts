@@ -9341,7 +9341,10 @@ function scanFailureMessage(
   }
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
-      return authenticationFailureMessage(authentication);
+      // An ACP agent owns its sign-in, and its error names the login command.
+      return authentication?.method === "agent"
+        ? diagnosticValue(error)
+        : authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
         return "The configured Codex provider denied access. Check the command credentials and provider permissions.";

@@ -4914,7 +4914,7 @@ export function classifyConnectionFailure(
     return "rate_limited";
   }
   if (
-    /\b401\b|\bunauthori[sz]ed\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b/iu.test(
+    /\b401\b|\bunauthori[sz]ed\b|\bauthentication required\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b/iu.test(
       message,
     )
   ) {
