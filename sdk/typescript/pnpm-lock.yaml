@@ -6,7 +6,7 @@ settings:
 
 overrides:
   '@openai/apps-sdk-ui@0.2.2>lodash': 4.18.1
-  '@openai/codex': 0.162.0-alpha.1
+  '@openai/codex': 0.169.0
   typed-rest-client@2.3.1>qs: 6.16.0
 
 packageExtensionsChecksum: sha256-RjyyqsKuq70Yk3NURy5CCORbwKDkJ7H2UOXJwERBpy8=
@@ -37,11 +37,11 @@ importers:
         specifier: 7.0.8
         version: 7.0.8
       '@openai/codex':
-        specifier: 0.162.0-alpha.1
-        version: 0.162.0-alpha.1
+        specifier: 0.169.0
+        version: 0.169.0
       '@openai/codex-sdk':
-        specifier: 0.162.0-alpha.1
-        version: 0.162.0-alpha.1
+        specifier: 0.169.0
+        version: 0.169.0
       ajv:
         specifier: 8.20.0
         version: 8.20.0
@@ -908,47 +908,47 @@ packages:
       react: ^18.0.0 || ^19.0.0
       tailwindcss: ^4.0.10
 
-  '@openai/codex-sdk@0.162.0-alpha.1':
-    resolution: {integrity: sha512-RRts5N5RG48hiWOj2VYVMxB538QCjZNLzm9uZsgfGjPzL6D+2wZJWXFF8KIlsEa7u2uGHEslVd7J4TeMf2ykcA==}
+  '@openai/codex-sdk@0.169.0':
+    resolution: {integrity: sha512-N2ZApXiOjjDiWKuoyaW3zdww9ggFtxKjeMp5qq+kW77UXDOxY2O6hg60ahip319Tlt6iwYEoDfPQzn9a6d3jFA==}
     engines: {node: '>=18'}
 
-  '@openai/codex@0.162.0-alpha.1':
-    resolution: {integrity: sha512-ffbQZ7ETPtERnEOOsdcJuFbtjQJuJUYbl7viUXLjuS9k7u9lu1ZrrEg5l1dOn1ZHJlZVq7NFTJYV8obuLHb4iQ==}
+  '@openai/codex@0.169.0':
+    resolution: {integrity: sha512-KhzYlkKPxoNssR8CEm45IjqnFWn7UtlF4CiD3tOJPea51xBs7MaHy0UQG9GSbCqk6Lrjn5QdJDV0QD1/FgWlGw==}
     engines: {node: '>=16'}
     hasBin: true
 
-  '@openai/codex@0.162.0-alpha.1-darwin-arm64':
-    resolution: {integrity: sha512-fUQFxUBKBe1hxCDL9FWwI50NGVRH3/5r7yg7NMNUYOBQIrafHBx0KiYjzjPgL+GC48KjQZluIaWRV9KcKk1zsA==}
+  '@openai/codex@0.169.0-darwin-arm64':
+    resolution: {integrity: sha512-5WsWFBbVP78D+6FvNo1MMVxLPZdmcoQlqVJFrF4qx/TmvneLnMQKtLyXkUo54XOTDfoYKpNouTJ/F7gTVA8FnQ==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [darwin]
 
-  '@openai/codex@0.162.0-alpha.1-darwin-x64':
-    resolution: {integrity: sha512-hH3VK9QoU05ENc+CHIDac65wUzK166mL9H7vG6Wh0pXPfF0OUkDIYowjW9j9t7pwfIDz/LiymZnE2uijNDgJow==}
+  '@openai/codex@0.169.0-darwin-x64':
+    resolution: {integrity: sha512-K1FKSsSLl9v3z5TeagBQXyQRDBIGB5Jncy5dxsRxwT3aaTqN3AI8VrCfoxBxKMOOU9O2QX1vg7WkBwNVth/s9A==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [darwin]
 
-  '@openai/codex@0.162.0-alpha.1-linux-arm64':
-    resolution: {integrity: sha512-o930qXC+UiwMEwXjAGgVvQq17asDih1806FM059h3qKpYTgh8tVo9kwTXJUNsXcRbuUYiViQDis+tNXGnTUWTQ==}
+  '@openai/codex@0.169.0-linux-arm64':
+    resolution: {integrity: sha512-NZ/DaQUpcQmxmqee7Z9uC1rzw3GhSbooawcaTe1LN5Yk+WlinUKGdTXJgClRT/9ogQEEM9TWxYzvxPfj5G/xFg==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [linux]
 
-  '@openai/codex@0.162.0-alpha.1-linux-x64':
-    resolution: {integrity: sha512-xIgH3Y/AUzkPn4CHRoNnIWYOtJwnYYZS0/mKoP7cwsl/X4Wo+sazWkyNvY+YE2UBH/tM/ut/xCGtWG3Tv77dwg==}
+  '@openai/codex@0.169.0-linux-x64':
+    resolution: {integrity: sha512-o05NyAOCDygSPRo1yinzxvkRSdmsZyBD9E7mbpmjRanSfM8lypqWtQgEo4XfNkwhuCR2aFu8mlGOsQGFXVbVww==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [linux]
 
-  '@openai/codex@0.162.0-alpha.1-win32-arm64':
-    resolution: {integrity: sha512-zZJNRiUl3m5Vnq1X3Wqnf7PAPaRoq4oei4vzaCVkUxtZxUllHKYIfty4+++81DbzoEZVkOnkIFpR26UmDVBQDw==}
+  '@openai/codex@0.169.0-win32-arm64':
+    resolution: {integrity: sha512-nTN9SpkacGohq60+I80R3t0R8Mhbnlt3OVYNahgAv1Gu77KFwhPc0vz9Ou/DAGDtYhKVWA/jiYXJXnlzkwb/JA==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [win32]
 
-  '@openai/codex@0.162.0-alpha.1-win32-x64':
-    resolution: {integrity: sha512-00sm3RQXP0/NWZPDVHqabM/ChrTPn84U9pj5wE6yf9ijYWvBzN5ODZ22YaWGDUt0qFhg2axrH9gpF7Ie5sziSQ==}
+  '@openai/codex@0.169.0-win32-x64':
+    resolution: {integrity: sha512-nC+McFU8xRNL9tk3IhxcKdhcyOElwF/HhPO+gzSQCY7yjh3XdzSajX+MYWcHUVHWRHajfwn3/WgJYJK2wS+XWg==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [win32]
@@ -3544,7 +3544,7 @@ snapshots:
   '@agentclientprotocol/codex-acp@1.12.0':
     dependencies:
       '@agentclientprotocol/sdk': 1.4.0(zod@4.6.5)
-      '@openai/codex': 0.162.0-alpha.1
+      '@openai/codex': 0.169.0
       diff: 9.0.0
       open: 11.0.4
       vscode-jsonrpc: 9.0.3
@@ -4246,35 +4246,35 @@ snapshots:
       - react-dom
       - supports-color
 
-  '@openai/codex-sdk@0.162.0-alpha.1':
+  '@openai/codex-sdk@0.169.0':
     dependencies:
-      '@openai/codex': 0.162.0-alpha.1
+      '@openai/codex': 0.169.0
 
-  '@openai/codex@0.162.0-alpha.1':
+  '@openai/codex@0.169.0':
     optionalDependencies:
-      '@openai/codex-darwin-arm64': '@openai/codex@0.162.0-alpha.1-darwin-arm64'
-      '@openai/codex-darwin-x64': '@openai/codex@0.162.0-alpha.1-darwin-x64'
-      '@openai/codex-linux-arm64': '@openai/codex@0.162.0-alpha.1-linux-arm64'
-      '@openai/codex-linux-x64': '@openai/codex@0.162.0-alpha.1-linux-x64'
-      '@openai/codex-win32-arm64': '@openai/codex@0.162.0-alpha.1-win32-arm64'
-      '@openai/codex-win32-x64': '@openai/codex@0.162.0-alpha.1-win32-x64'
+      '@openai/codex-darwin-arm64': '@openai/codex@0.169.0-darwin-arm64'
+      '@openai/codex-darwin-x64': '@openai/codex@0.169.0-darwin-x64'
+      '@openai/codex-linux-arm64': '@openai/codex@0.169.0-linux-arm64'
+      '@openai/codex-linux-x64': '@openai/codex@0.169.0-linux-x64'
+      '@openai/codex-win32-arm64': '@openai/codex@0.169.0-win32-arm64'
+      '@openai/codex-win32-x64': '@openai/codex@0.169.0-win32-x64'
 
-  '@openai/codex@0.162.0-alpha.1-darwin-arm64':
+  '@openai/codex@0.169.0-darwin-arm64':
     optional: true
 
-  '@openai/codex@0.162.0-alpha.1-darwin-x64':
+  '@openai/codex@0.169.0-darwin-x64':
     optional: true
 
-  '@openai/codex@0.162.0-alpha.1-linux-arm64':
+  '@openai/codex@0.169.0-linux-arm64':
     optional: true
 
-  '@openai/codex@0.162.0-alpha.1-linux-x64':
+  '@openai/codex@0.169.0-linux-x64':
     optional: true
 
-  '@openai/codex@0.162.0-alpha.1-win32-arm64':
+  '@openai/codex@0.169.0-win32-arm64':
     optional: true
 
-  '@openai/codex@0.162.0-alpha.1-win32-x64':
+  '@openai/codex@0.169.0-win32-x64':
     optional: true
 
   '@radix-ui/number@1.1.3': {}
