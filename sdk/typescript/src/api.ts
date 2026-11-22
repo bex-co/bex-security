@@ -4314,7 +4314,11 @@ export class CodexSecurity {
             matchFindings: (input, comparisonOptions) =>
               (this.#dependencies.matchFindings ?? matchScanFindingsInternal)(
                 input,
-                { ...comparisonOptions, config: this.config },
+                // Native Codex keeps the worker's inference config; ACP agents
+                // need the configured agent selection instead.
+                configuredAgent(this.config) === "codex"
+                  ? comparisonOptions
+                  : { ...comparisonOptions, config: this.config },
                 {
                   surface: this.#surface,
                   singleTurn: options.maxCostUsd !== undefined,
@@ -6421,7 +6425,8 @@ export async function runScanEvents(
 ): Promise<ScanResult> {
   let scanStarted = false;
   let tacStatusReported = false;
-  const reportedProgress = new Set<string>();
+  // Streamed items repeat their earlier markers as their text grows.
+  const reportedProgress = new Map<string, number>();
   try {
     options.signal.throwIfAborted();
     const turn = await readCodexTurn({
@@ -6456,10 +6461,18 @@ export async function runScanEvents(
           notifyObserver(options, "onActivity")(activity);
         }
         options.onProgressItem?.(event);
-        for (const progress of scanProgressUpdatesFromEvent(event)) {
-          const progressKey = `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
-          if (reportedProgress.has(progressKey)) continue;
-          reportedProgress.add(progressKey);
+        const progressUpdates = scanProgressUpdatesFromEvent(event);
+        const itemId = isRecord(event["item"])
+          ? event["item"]["id"]
+          : undefined;
+        const alreadyReported =
+          typeof itemId === "string" ? (reportedProgress.get(itemId) ?? 0) : 0;
+        if (
+          typeof itemId === "string" &&
+          progressUpdates.length > alreadyReported
+        )
+          reportedProgress.set(itemId, progressUpdates.length);
+        for (const progress of progressUpdates.slice(alreadyReported)) {
           notifyObserver(
             {
               onProgress: (update) => options.onProgress?.(update, { event }),

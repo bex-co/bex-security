@@ -97,8 +97,12 @@ async function runJson(repo, args, input) {
   return JSON.parse(result.stdout.toString("utf8"));
 }
 async function initialize(fixture) {
+  // The CLI's own package may be published under a fork's name.
+  const { name } = JSON.parse(
+    await readFile(join(cli, "..", "..", "package.json"), "utf8"),
+  );
   const sdkEntry = createRequire(pathToFileURL(cli)).resolve(
-    "@openai/codex-security/stack-packet",
+    `${name}/stack-packet`,
   );
   const { prepareStackPacket } = await import(pathToFileURL(sdkEntry).href);
   const attempt = await mkdtemp(join(scratch, "attempt-"));

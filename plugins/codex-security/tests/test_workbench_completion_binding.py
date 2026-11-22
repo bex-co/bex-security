@@ -1078,9 +1078,8 @@ def test_cli_completion_requires_finished_analysis_but_allows_partial_coverage(
     assert sealed["complete"] is True
     assert sealed["sealedAt"]
     assert sealed["artifacts"]
-    final_coverage = json.loads(coverage_path.read_text())
-    assert final_coverage["completeness"] == "partial"
-    assert final_coverage["deferred"] == coverage["deferred"]
+    # Sealed review state records partial coverage as its deferred items.
+    assert read_review_state(state_dir, scan_dir)["deferred"] == coverage["deferred"]
     assert report_path.is_file()
 
 
