@@ -7,17 +7,27 @@ minimumReleaseAgeExclude:
 trustLockfile: true
 
 overrides:
-  "@huggingface/transformers@4.2.0>sharp": 0.35.4
-  "@openai/codex": "$@openai/codex-sdk"
-  "@openai/codex-sdk": "$@openai/codex-sdk"
-  "@opencode-ai/sdk": "$@opencode-ai/sdk"
-  "onnxruntime-node@1.24.3>adm-zip": 0.6.0
+  "glob@13": 14.0.3
+  "minimatch@10": 11.0.2
+  "promptfoo@0.125.1>@hono/node-server": 2.1.8
+  "get-uri@8.0.1>basic-ftp": 6.2.6
 
 allowBuilds:
   "@playwright/browser-chromium": false
   "@swc/core": false
-  better-sqlite3: true
   esbuild: false
   onnxruntime-node: false
   protobufjs: false
   sharp: false
+
+# Triage uses the Codex provider, JSON and YAML fixtures, and JavaScript assertions.
+ignoredOptionalDependencies:
+  - "@aws-sdk/*"
+  - "@aws/bedrock-token-generator"
+  - "@azure/*"
+  - "@opencode-ai/sdk"
+  - natural
+  - node-sql-parser
+  - pdf-parse
+  - read-excel-file
+  - sharp

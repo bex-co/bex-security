@@ -1,12 +1,18 @@
-import { createHash, randomUUID } from "node:crypto";
-import { z } from "incur";
+import { hash, randomUUID } from "node:crypto";
+import { z } from "zod";
 import { DeduplicationReviewError } from "../errors.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
 import type { CodexReview } from "./codex-review.js";
 import { FindingDeduplicator } from "./deduplication.js";
 import { CodexDeduplicationReviewer } from "./deduplication-reviewer.js";
-import { findingSchema, requireFinding } from "./finding-schema.js";
+import {
+  findingSchema,
+  importedFindingSchema,
+  requireFinding,
+  requireImportedFinding,
+  type ImportedFinding,
+} from "./finding-schema.js";
 import {
   sourceReviewInstructions,
   screeningInstructions,
@@ -16,6 +22,7 @@ import {
 } from "./deduplication-prompts.js";
 import type {
   DeduplicationReviewAttribution,
+  DeduplicationReviewRequest,
   DeduplicationReviewRunner,
 } from "./review.js";
 
@@ -34,51 +41,64 @@ export function recordsReviewAttribution(
       return observationId;
     }),
   );
-  const beneficiaryObservationIds = [...participants]
-    .filter((id) => anchors.has(id))
-    .sort();
+  const beneficiaryObservationIds = [
+    ...participants.intersection(anchors),
+  ].sort();
   if (beneficiaryObservationIds.length === 0)
     throw new Error("Records review has no incoming observation participants.");
   return {
     version: 1,
     beneficiaryObservationIds,
-    contextObservationIds: [...participants]
-      .filter((id) => !anchors.has(id))
-      .sort(),
+    contextObservationIds: [...participants.difference(anchors)].sort(),
+  };
+}
+
+function reviewFindingSchema(
+  ids: readonly string[],
+  importedIds: ReadonlySet<string>,
+): object {
+  const imported = ids.filter((id) => importedIds.has(id));
+  if (!imported.length) return findingSchema();
+  if (imported.length === ids.length) return importedFindingSchema();
+  const native = findingSchema();
+  return {
+    ...importedFindingSchema(),
+    if: { properties: { findingId: { enum: imported } } },
+    else: {
+      required: native.required,
+      properties: { locations: native.properties.locations },
+    },
   };
 }
 
 const id = z.string().min(1);
-const record = z
-  .object({
+const record = z.discriminatedUnion("kind", [
+  z.strictObject({
     id,
-    finding: z.unknown().transform((value) => requireFinding(value)),
-  })
-  .strict();
+    kind: z.undefined().optional(),
+    finding: z.unknown().transform(requireFinding),
+  }),
+  z.strictObject({
+    id,
+    kind: z.literal("imported"),
+    finding: z.unknown().transform(requireImportedFinding),
+  }),
+]);
 
-const deduplicateRecordsInputSchema: z.ZodType<DeduplicateRecordsInput> = z
-  .object({
-    version: z.literal(1),
-    observations: z.array(record),
-    candidateRelationships: z.array(
-      z
-        .object({
-          observationId: id,
-          candidateObservationIds: z.array(id),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+const deduplicateRecordsInputSchema = z.strictObject({
+  version: z.literal(1),
+  observations: z.array(record),
+  candidateRelationships: z.array(
+    z.strictObject({
+      observationId: id,
+      candidateObservationIds: z.array(id),
+    }),
+  ),
+});
 
-export interface DeduplicateRecordsInput {
-  version: 1;
-  observations: { id: string; finding: Finding }[];
-  candidateRelationships: {
-    observationId: string;
-    candidateObservationIds: string[];
-  }[];
-}
+export interface DeduplicateRecordsInput extends z.infer<
+  typeof deduplicateRecordsInputSchema
+> {}
 export interface DeduplicateRecordsOptions {
   reviewRunner: DeduplicationReviewRunner;
   signal?: AbortSignal;
@@ -102,19 +122,34 @@ export async function deduplicateRecords(
   input: DeduplicateRecordsInput,
   options: DeduplicateRecordsOptions,
 ): Promise<DeduplicateRecordsResult> {
-  options.signal?.throwIfAborted();
+  return await runRecords(
+    input,
+    (request) => options.reviewRunner.run(request, { signal: options.signal }),
+    options.signal,
+  );
+}
+
+/** The records transport can check a pending submission before releasing its host. */
+export async function runRecords(
+  input: DeduplicateRecordsInput,
+  runReview: (
+    request: DeduplicationReviewRequest,
+    validate: (value: unknown) => void,
+  ) => Promise<unknown>,
+  signal?: AbortSignal,
+): Promise<DeduplicateRecordsResult> {
+  signal?.throwIfAborted();
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
   const references = new Map<string, string>();
-  const observations = new Map<string, Finding>();
+  const observations = new Map<string, Finding | ImportedFinding>();
+  const importedIds = new Set<string>();
   for (const entry of data.observations) {
     if (observations.has(entry.id))
       throw new Error(`Duplicate observation ID: ${entry.id}`);
     // Original finding IDs can repeat across scans; host IDs identify observations.
-    const findingId = `csf_${createHash("sha256")
-      .update(entry.id)
-      .digest("hex")
-      .slice(0, 24)}`;
+    const findingId = `csf_${hash("sha256", entry.id).slice(0, 24)}`;
+    if (entry.kind === "imported") importedIds.add(findingId);
     observations.set(entry.id, { ...entry.finding, findingId });
     references.set(findingId, entry.id);
   }
@@ -145,10 +180,10 @@ export async function deduplicateRecords(
     groups: [],
     unresolved: [],
   };
-  const sourceFindings = [...relationships.keys()].map((id) =>
-    observations.get(id)!,
+  const sourceFindingIds = [...relationships.keys()].map(
+    (id) => observations.get(id)!.findingId,
   );
-  const reviewer = new CodexDeduplicationReviewer({
+  const runner = {
     async run<T>({
       validate,
       findingIds,
@@ -156,9 +191,9 @@ export async function deduplicateRecords(
     }: CodexReview<T>): Promise<T> {
       try {
         return await abortable(async () => {
-          options.signal?.throwIfAborted();
+          signal?.throwIfAborted();
           return validate(
-            await options.reviewRunner.run(
+            await runReview(
               {
                 ...review,
                 requestId: randomUUID(),
@@ -176,12 +211,14 @@ export async function deduplicateRecords(
                     ? screeningFindingFormatInstructions
                     : pairFindingFormatInstructions,
                 ].join("\n\n"),
-                findingSchema: findingSchema(),
+                findingSchema: structuredClone(
+                  reviewFindingSchema(findingIds ?? [], importedIds),
+                ),
               },
-              { signal: options.signal },
+              validate,
             ),
           );
-        }, options.signal);
+        }, signal);
       } catch (error) {
         // Records mode discards the batch after any failed review.
         if (
@@ -192,7 +229,8 @@ export async function deduplicateRecords(
         throw error;
       }
     },
-  });
+  };
+  const reviewer = new CodexDeduplicationReviewer(runner, {}, importedIds);
   const algorithm = new FindingDeduplicator(
     {
       async potentialDuplicates(findingId) {
@@ -206,18 +244,16 @@ export async function deduplicateRecords(
       },
     },
     reviewer,
-    options.signal,
+    signal,
     1,
   );
   let groups: string[][];
   try {
-    const decisions = await algorithm.run(
-      sourceFindings.map((finding) => finding.findingId),
-    );
-    options.signal?.throwIfAborted();
+    const decisions = await algorithm.run(sourceFindingIds);
+    signal?.throwIfAborted();
     groups = decisions.duplicateGroups;
   } catch (error) {
-    options.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     result.status = "unresolved";
     result.unresolved = [...relationships.keys()].map((id) => ({
       observationId: id,
@@ -229,9 +265,7 @@ export async function deduplicateRecords(
   }
   const grouped = new Set(groups.flat());
   groups.push(
-    ...sourceFindings
-      .filter((finding) => !grouped.has(finding.findingId))
-      .map((finding) => [finding.findingId]),
+    ...sourceFindingIds.filter((id) => !grouped.has(id)).map((id) => [id]),
   );
   for (const group of groups) {
     const observationIds = group.map((id) => references.get(id)!);

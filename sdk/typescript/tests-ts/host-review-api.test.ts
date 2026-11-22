@@ -9,14 +9,11 @@ import {
   mockScanRegistration,
   mockWorkbench,
 } from "./support/api-client.js";
-import {
-  completedEvents,
-  createApiTestFixtures,
-  preparedRuntime,
-} from "./support/api-events.js";
+import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { copyCompletedScan } from "./plugin-root.js";
 
-const { temporaryDirectory, cleanup, copyCompletedScan } =
-  createApiTestFixtures();
+const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 test.each(["success", "failure"] as const)(

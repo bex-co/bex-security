@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { ConfigurationError } from "../src/errors.js";
 import {
+  hasDeferredReview,
   recordUncoveredCoverage,
   runHostReviewAssignments,
   type HostReviewClient,
@@ -967,9 +968,68 @@ describe("host ACP review assignments", () => {
     }
   });
 
-  test("records uncovered files as deferred coverage", async () => {
+  const uncovered = [
+    { path: "b.ts", reason: "1 assigned files lacked completed read evidence" },
+  ];
+
+  test("records uncovered files as deferred review work in the manifest", async () => {
+    const value = await fixture();
+    const manifestPath = join(value.scanDirectory, "scan-manifest.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        scan: {
+          id: "scan-1",
+          reviewState: {
+            surfaces: [],
+            deferred: [{ id: "existing", reason: "Pending candidate." }],
+          },
+        },
+      }),
+    );
+    try {
+      await recordUncoveredCoverage(
+        value.scanDirectory,
+        uncovered,
+        new AbortController().signal,
+      );
+      await recordUncoveredCoverage(
+        value.scanDirectory,
+        uncovered,
+        new AbortController().signal,
+      );
+
+      const manifest = await json(manifestPath);
+      expect(manifest.scan.reviewState.deferred).toEqual([
+        { id: "existing", reason: "Pending candidate." },
+        expect.objectContaining({
+          id: "host-review-uncovered-files",
+          paths: ["b.ts"],
+        }),
+      ]);
+      expect(hasDeferredReview(manifest)).toBe(true);
+      expect(
+        hasDeferredReview({
+          scan: {
+            reviewState: {
+              deferred: [{ id: "done", reason: "Finished." }],
+              resolvedDeferred: [{ id: "done", reason: "Reviewed." }],
+            },
+          },
+        }),
+      ).toBe(false);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("records uncovered files in a legacy coverage document", async () => {
     const value = await fixture();
     const coveragePath = join(value.scanDirectory, "coverage.json");
+    await writeFile(
+      join(value.scanDirectory, "scan-manifest.json"),
+      JSON.stringify({ scan: { id: "scan-1", coverageRef: "coverage.json" } }),
+    );
     await writeFile(
       coveragePath,
       JSON.stringify({ completeness: "complete", deferred: [] }),
@@ -977,12 +1037,7 @@ describe("host ACP review assignments", () => {
     try {
       await recordUncoveredCoverage(
         value.scanDirectory,
-        [
-          {
-            path: "b.ts",
-            reason: "1 assigned files lacked completed read evidence",
-          },
-        ],
+        uncovered,
         new AbortController().signal,
       );
 

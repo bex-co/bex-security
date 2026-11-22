@@ -24,17 +24,11 @@ The SastBench adapter owns only benchmark-specific behavior:
 
 The model-visible prompt contains the affected checkout, an opaque case ID, and the record's `to_analyzer` data. Ground truth is stored in Promptfoo test metadata. The upstream `finding_id`, `ground_truth`, `metadata.source`, and dataset class statistics are not prompt variables.
 
-The Codex provider runs from a throwaway directory containing only the runtime skill files. A deny-by-default permission profile grants reads only to that directory, the hydrated target repos and their label-free Git cache, and Codex's minimal runtime paths; the label-bearing dataset and Promptfoo harness stay denied.
+The Codex provider runs from the common runner's throwaway skill directory. Its permission profile also grants reads to the hydrated target repositories, its label-free Git cache, the Node runtime, and Codex's minimal runtime paths; the label-bearing dataset and Promptfoo harness stay denied.
 
 ## Verdict mapping
 
-| Triage verdict | SastBench interpretation |
-| --- | --- |
-| `confirmed` | predicts true positive |
-| `not_actionable` | predicts false positive |
-| `needs_review` | abstains |
-
-Strict metrics count an abstention as incorrect for that row. Decided-only metrics exclude abstentions and report coverage. Workflow metrics separately measure true-positive retention, unsafe closure, false-alert auto-closure, false-alert escalation, confirmed precision, abstention, and remaining analyst workload. Model errors and invalid output remain unresolved work.
+The [verdict mapping](README.md#verdict-mapping) defines how strict and decided-only metrics count each triage verdict, abstention, and execution error. The [aggregate metric definitions](README.md#aggregate-metric-definitions) give the formulas and explain how unresolved work affects the analyst workload.
 
 ## Reproducibility
 

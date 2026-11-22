@@ -1,4 +1,8 @@
 import { CodexSecurityError } from "./errors.js";
+import {
+  parseFindingsErrorResponse,
+  type FindingsErrorCode,
+} from "./findings-errors.js";
 import { retryDelay, waitForRetry } from "./deduplication/retry.js";
 import type { Finding } from "./models.js";
 import type {
@@ -16,8 +20,36 @@ class FindingsHttpError extends CodexSecurityError {
     message: string,
     readonly status: number,
     readonly retryAfter: string | null,
+    readonly code?: FindingsErrorCode,
   ) {
     super(message);
+  }
+
+  static async fromResponse(
+    response: Response,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<FindingsHttpError> {
+    // Service errors are JSON; other gateway bodies need not finish to report HTTP failure.
+    const mediaType = response.headers
+      .get("Content-Type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    let body: unknown;
+    if (mediaType === "application/json" || mediaType?.endsWith("+json")) {
+      body = await response.json().catch(() => undefined);
+    } else {
+      void response.body?.cancel().catch(() => undefined);
+    }
+    signal?.throwIfAborted();
+    const error = parseFindingsErrorResponse(body);
+    return new FindingsHttpError(
+      error?.message ? `${message} ${error.message}` : message,
+      response.status,
+      response.headers.get("Retry-After"),
+      error?.error,
+    );
   }
 }
 
@@ -28,16 +60,27 @@ function isRetryable(error: unknown): boolean {
   return error instanceof TypeError || error instanceof SyntaxError;
 }
 
+export function findingsBaseUrl(value: string): URL {
+  const url = new URL(value);
+  if (!url.pathname.endsWith("/")) url.pathname += "/";
+  url.search = "";
+  url.hash = "";
+  return url;
+}
+
 export class FindingsClient {
+  private readonly url: URL;
   constructor(
-    private readonly url: string,
+    url: string,
     private readonly signal?: AbortSignal,
     private readonly request: FindingsRequest = fetch,
     private readonly retries: {
       wait?: typeof waitForRetry;
       random?: () => number;
     } = {},
-  ) {}
+  ) {
+    this.url = findingsBaseUrl(url);
+  }
 
   async potentialDuplicates(
     findingId: string,
@@ -50,17 +93,16 @@ export class FindingsClient {
       url.searchParams.set("allRepositories", "true");
     else url.searchParams.set("repositoryId", scope.repositoryId);
     return await this.retry(async () => {
-      const response = await this.request(url, { signal: this.signal });
+      const response = await this.requestEndpoint(url);
       if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
-        throw new FindingsHttpError(
+        throw await FindingsHttpError.fromResponse(
+          response,
           `Potential-duplicates lookup for ${findingId} failed (HTTP ${response.status}).${
             response.status === 404
               ? " Import the finding with its repositoryId through POST /v1/bulk/findings before deduplicating."
               : ""
           }`,
-          response.status,
-          response.headers.get("Retry-After"),
+          this.signal,
         );
       }
       return (await response.json()) as FindingNeighborhood;
@@ -117,22 +159,58 @@ export class FindingsClient {
   }
 
   private endpoint(path: string): URL {
-    return new URL(path, this.url.endsWith("/") ? this.url : `${this.url}/`);
+    return new URL(path, this.url);
+  }
+
+  private async requestEndpoint(
+    url: URL,
+    post?: RequestInit,
+  ): Promise<Response> {
+    for (let redirects = 0; ; redirects++) {
+      const response = await this.request(url, {
+        ...post,
+        signal: this.signal,
+        redirect: "manual",
+      });
+      const location = response.headers.get("Location");
+      if (
+        location === null ||
+        ![301, 302, 303, 307, 308].includes(response.status)
+      )
+        return response;
+      void response.body?.cancel().catch(() => undefined);
+      this.signal?.throwIfAborted();
+      // Fetch exposes header bytes as a Latin-1 string; URL paths use UTF-8.
+      const next = new URL(
+        Buffer.from(location, "latin1").toString("utf8"),
+        url,
+      );
+      if (next.protocol !== this.url.protocol || next.host !== this.url.host)
+        throw new FindingsHttpError(
+          `Findings API redirect leaves the configured service origin (HTTP ${response.status}). Configure the final service URL.`,
+          response.status,
+          null,
+        );
+
+      // Retain Fetch's redirect limit and POST-to-GET behavior.
+      if (redirects === 20)
+        throw new TypeError("Too many findings service redirects.");
+      if ([301, 302, 303].includes(response.status)) post = undefined;
+      url = next;
+    }
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {
-    const response = await this.request(this.endpoint(path), {
+    const response = await this.requestEndpoint(this.endpoint(path), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: this.signal,
     });
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new FindingsHttpError(
+      throw await FindingsHttpError.fromResponse(
+        response,
         `Findings API POST /${path} failed (HTTP ${response.status}).`,
-        response.status,
-        response.headers.get("Retry-After"),
+        this.signal,
       );
     }
     return await response.json();

@@ -1,18 +1,20 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 
-FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS package
+FROM node:26.13-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1 AS base
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes python3 \
+    && apt-get install --no-install-recommends --yes ca-certificates git openssh-client python3 \
     && rm -rf /var/lib/apt/lists/*
 
+FROM base AS package
 WORKDIR /build/sdk/typescript
 
 COPY package.json /build/package.json
 COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml sdk/typescript/pnpm-workspace.yaml ./
 COPY plugins/codex-security/mcp-app/package.json plugins/codex-security/mcp-app/pnpm-lock.yaml plugins/codex-security/mcp-app/pnpm-workspace.yaml /build/plugins/codex-security/mcp-app/
 
-RUN corepack enable \
+RUN npm install --global --no-audit --no-fund corepack@0.36.0 \
+    && corepack enable \
     && corepack prepare "$(node --print 'require("/build/package.json").packageManager')" --activate \
     && pnpm install --frozen-lockfile \
     && pnpm --dir /build/plugins/codex-security/mcp-app install --frozen-lockfile
@@ -24,31 +26,11 @@ RUN pnpm run types \
     && pnpm pack --pack-destination /build/package \
     && node scripts/check-package.mjs /build/package/*.tgz
 
-FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS scanner
+FROM base AS runtime
 
 LABEL org.opencontainers.image.title="Bex Security" \
       org.opencontainers.image.description="Agent-portable, evidence-backed repository security scans" \
       org.opencontainers.image.source="https://github.com/bex-co/bex-security"
-
-RUN apt-get update \
-    && apt-get install --no-install-recommends --yes \
-        ca-certificates \
-        git \
-        openssh-client \
-        python3 \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=package /build/package/ /tmp/codex-security-package/
-
-RUN npm install --global --include=optional --no-audit --no-fund \
-        /tmp/codex-security-package/*.tgz \
-    && mkdir -p /usr/local/lib/node_modules/@openai \
-    && ln -s ../@bex-co/bex-security \
-        /usr/local/lib/node_modules/@openai/codex-security \
-    && codex-security --version \
-    && codex-security bulk-scan --help \
-    && rm -rf /tmp/codex-security-package \
-    && npm cache clean --force
 
 COPY --chmod=0555 docker/entrypoint.sh /usr/local/bin/codex-security-entrypoint
 COPY --chmod=0555 docker/git-credential.sh /usr/local/bin/codex-security-git-credential
@@ -58,14 +40,42 @@ RUN groupadd --gid 10001 codex-security \
     && mkdir -p /input /output /state \
     && chown 10001:10001 /output /state
 
-ENV CODEX_HOME=/state \
-    CODEX_SECURITY_STATE_DIR=/output/.codex-security-state \
+ENV CODEX_SECURITY_STATE_DIR=/output/.codex-security-state \
     GIT_TERMINAL_PROMPT=0 \
-    HOME=/state \
     PYTHON=/usr/bin/python3
 
-USER 10001:10001
 WORKDIR /state
 
 ENTRYPOINT ["/usr/local/bin/codex-security-entrypoint"]
 CMD ["--help"]
+
+# Release builds supply a verified npm tarball and a frozen runtime lock.
+FROM runtime AS scanner-release
+RUN --mount=type=bind,from=release-inputs,target=/tmp/scanner,rw \
+    cd /tmp/scanner \
+    && npm ci --ignore-scripts --include=optional --no-audit --no-fund \
+    && node node_modules/@openai/codex/bin/codex.js --version \
+    && mkdir /opt/codex-security \
+    && mv node_modules /opt/codex-security/ \
+    && ln -s /opt/codex-security/node_modules/.bin/codex-security /usr/local/bin/codex-security \
+    && ln -s /opt/codex-security/node_modules/.bin/cs /usr/local/bin/cs \
+    && npm cache clean --force
+ENV HOME=/state CODEX_HOME=/state
+USER 10001:10001
+
+# Local and pull request builds package the current checkout.
+FROM runtime AS scanner
+COPY --from=package /build/package/ /tmp/codex-security-package/
+
+RUN npm install --global --include=optional --no-audit --no-fund \
+        /tmp/codex-security-package/*.tgz \
+    && mkdir -p /usr/local/lib/node_modules/@openai \
+    && ln -s ../@bex-co/bex-security \
+        /usr/local/lib/node_modules/@openai/codex-security \
+    && node /usr/local/lib/node_modules/@bex-co/bex-security/node_modules/@openai/codex/bin/codex.js --version \
+    && codex-security --version \
+    && codex-security bulk-scan --help \
+    && rm -rf /tmp/codex-security-package \
+    && npm cache clean --force
+ENV HOME=/state CODEX_HOME=/state
+USER 10001:10001

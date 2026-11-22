@@ -1,5 +1,5 @@
-import { isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
+import { asRecord as record, isNonEmptyString } from "../record.js";
+import { isAbsolute, relative, toNamespacedPath } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { DeepScanNonRetryableError } from "./errors.js";
 
@@ -7,31 +7,35 @@ export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 
 export type DeepWorkerParentSandbox = {
   /**
-   * Validated path and glob keys copied into the worker's stricter root-read
-   * profile. Grants are intentionally not transported because Deep Scan
-   * workers never inherit parent write access.
+   * Validated glob keys copied into the worker's stricter root-read
+   * profile. Workers never inherit parent write access.
    */
   readonly filesystemDenies: readonly string[];
+  /** Preserve literal paths separately from glob patterns. */
+  readonly literalFilesystemDenies?: readonly string[];
+  /** Windows needs the parent's named read root for the selected plugin. */
+  readonly pluginReadRoot?: string;
+  /** Preserve the selected source's named read root for Windows ACL setup. */
+  readonly sourceReadRoot?: string;
   readonly globScanMaxDepth?: number;
 };
 
 /** Resolve the effective host policy, never a model-supplied scan argument. */
 export function resolveDeepWorkerParentSandbox(
   extra: unknown,
+  pluginRoot = process.platform === "win32"
+    ? process.env.CODEX_SECURITY_PLUGIN_ROOT
+    : undefined,
+  sourceRoot = process.platform === "win32"
+    ? process.env.CODEX_SECURITY_REPOSITORY
+    : undefined,
 ): DeepWorkerParentSandbox {
   const state = trustedSandboxState(extra);
-  validateSandboxCwd(state.sandboxCwd);
 
   const profile = record(state.permissionProfile);
   if (!profile || profile.type !== "managed") {
     throw unsupportedParentSandbox(
       "the parent must provide a managed filesystem permission profile",
-    );
-  }
-
-  if (profile.network !== "enabled" && profile.network !== "restricted") {
-    throw unsupportedParentSandbox(
-      "the parent network permission is missing or invalid",
     );
   }
 
@@ -56,6 +60,9 @@ export function resolveDeepWorkerParentSandbox(
 
   let hasRootRead = false;
   const filesystemDenies: string[] = [];
+  const literalFilesystemDenies: string[] = [];
+  let pluginReadRoot: string | undefined;
+  let sourceReadRoot: string | undefined;
   for (const value of filesystem.entries) {
     const entry = record(value);
     if (!entry || !isKnownFilesystemAccess(entry.access)) {
@@ -101,12 +108,24 @@ export function resolveDeepWorkerParentSandbox(
             "a parent filesystem denial path cannot be preserved",
           );
         }
-        if (hasGlobMetacharacters(path.path)) {
-          throw unsupportedParentSandbox(
-            "a parent filesystem denial path with glob characters cannot be preserved",
-          );
-        }
-        filesystemDenies.push(path.path);
+        literalFilesystemDenies.push(path.path);
+      } else if (entry.access === "read" && isAbsolute(path.path)) {
+        if (
+          pluginRoot !== undefined &&
+          relative(
+            toNamespacedPath(path.path),
+            toNamespacedPath(pluginRoot),
+          ) === ""
+        )
+          pluginReadRoot = path.path;
+        if (
+          sourceRoot !== undefined &&
+          relative(
+            toNamespacedPath(path.path),
+            toNamespacedPath(sourceRoot),
+          ) === ""
+        )
+          sourceReadRoot = path.path;
       }
     } else if (path.type === "glob_pattern") {
       if (!isNonEmptyString(path.pattern)) {
@@ -145,6 +164,9 @@ export function resolveDeepWorkerParentSandbox(
 
   return {
     filesystemDenies,
+    ...(pluginReadRoot === undefined ? {} : { pluginReadRoot }),
+    ...(sourceReadRoot === undefined ? {} : { sourceReadRoot }),
+    ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),
   };
 }
@@ -174,29 +196,6 @@ function trustedSandboxState(extra: unknown): Record<string, unknown> {
     );
   }
   return state;
-}
-
-function validateSandboxCwd(value: unknown): void {
-  if (value === undefined) return;
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw unsupportedParentSandbox(
-      "the parent sandbox working directory is invalid",
-    );
-  }
-  if (value.startsWith("file:")) {
-    try {
-      if (isAbsolute(fileURLToPath(value))) return;
-    } catch {
-      throw unsupportedParentSandbox(
-        "the parent sandbox working directory is invalid",
-      );
-    }
-  }
-  if (!isAbsolute(value)) {
-    throw unsupportedParentSandbox(
-      "the parent sandbox working directory is invalid",
-    );
-  }
 }
 
 function resolveGlobScanMaxDepth(
@@ -271,20 +270,6 @@ function isValidSpecialPath(value: Record<string, unknown>): boolean {
     return value.subpath === undefined || value.subpath === null;
   }
   return false;
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function hasGlobMetacharacters(value: string): boolean {
-  return value.includes("*") || value.includes("?") || value.includes("[");
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 function unsupportedParentSandbox(reason: string): DeepScanNonRetryableError {

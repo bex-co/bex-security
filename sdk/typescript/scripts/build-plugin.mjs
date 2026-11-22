@@ -1,31 +1,28 @@
-import { execFile } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { basename, toNamespacedPath } from "node:path/win32";
+import { isDeepStrictEqual } from "node:util";
 import {
   chmod,
   copyFile,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
 } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { retryWindowsRename } from "../src/retry-windows-rename.js";
+import { isMain } from "./is-main.mjs";
+import { pluginContractFiles } from "./plugin-contract.mjs";
 
-const scriptDirectory = dirname(fileURLToPath(import.meta.url));
-const packageRoot = resolve(scriptDirectory, "..");
+const packageRoot = resolve(import.meta.dirname, "..");
 const repositoryRoot = resolve(packageRoot, "../..");
-const publicManifest = ".codex-plugin/plugin.json";
-const execFileAsync = promisify(execFile);
-
-function sourcePath(root, relativePath) {
-  return join(root, ...relativePath.split("/"));
-}
 
 function validatePath(path) {
   const parts = path.split("/");
   if (
-    path === "" ||
     path.includes("\\") ||
     posix.isAbsolute(path) ||
     parts.some((part) => part === "" || part === "." || part === "..")
@@ -36,15 +33,15 @@ function validatePath(path) {
   }
 }
 
-async function destinationFiles(root, prefix = "") {
-  const entries = await readdir(sourcePath(root, prefix), {
+export async function bundledPluginFiles(root, prefix = "") {
+  const entries = await readdir(join(root, prefix), {
     withFileTypes: true,
   });
   const files = [];
   for (const entry of entries) {
     const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
     if (entry.isDirectory()) {
-      files.push(...(await destinationFiles(root, path)));
+      files.push(...(await bundledPluginFiles(root, path)));
     } else if (entry.isFile()) {
       files.push(path);
     } else {
@@ -54,6 +51,7 @@ async function destinationFiles(root, prefix = "") {
   return files.sort();
 }
 
+/** @returns {Promise<string[]>} */
 export async function buildBundledPlugin({
   contractPath = join(
     repositoryRoot,
@@ -65,34 +63,12 @@ export async function buildBundledPlugin({
   source = join(repositoryRoot, "plugins", "codex-security"),
 } = {}) {
   const contract = JSON.parse(await readFile(contractPath, "utf8"));
-  const { externalOwnedExact, shippedExact } = contract;
-  if (
-    !Array.isArray(externalOwnedExact) ||
-    !externalOwnedExact.every((path) => typeof path === "string") ||
-    !Array.isArray(shippedExact) ||
-    !shippedExact.every((path) => typeof path === "string")
-  ) {
-    throw new Error("Plugin projection contract contains invalid paths.");
-  }
-  if (!externalOwnedExact.includes(publicManifest)) {
-    throw new Error(
-      "Plugin projection contract must declare the public manifest as externally owned.",
-    );
-  }
-
-  const files = [
-    publicManifest,
-    ...shippedExact.filter((path) => !path.startsWith("sdk/")),
-  ];
-  files.forEach(validatePath);
-  if (new Set(files).size !== files.length) {
-    throw new Error("Plugin projection contract contains duplicate paths.");
-  }
+  const files = pluginContractFiles(contract, validatePath);
 
   const copiedPaths = files.filter((path) => !path.startsWith("mcp/"));
   const sourceFiles = await Promise.all(
     copiedPaths.map(async (path) => {
-      const file = sourcePath(source, path);
+      const file = join(source, path);
       let metadata;
       try {
         metadata = await lstat(file);
@@ -111,43 +87,86 @@ export async function buildBundledPlugin({
     }),
   );
 
-  await rm(destination, { force: true, recursive: true });
-  if (files.some((path) => path.startsWith("mcp/"))) {
-    const mcpApp = sourcePath(source, "mcp-app");
-    await execFileAsync(
-      process.execPath,
-      [
-        sourcePath(mcpApp, "scripts/build_mcp_app.mjs"),
-        "--output",
-        sourcePath(destination, "mcp"),
-      ],
-      { cwd: mcpApp, maxBuffer: 10 * 1024 * 1024 },
-    );
-  }
-  for (const { file, mode, path } of sourceFiles) {
-    const output = sourcePath(destination, path);
-    await mkdir(dirname(output), { recursive: true });
-    await copyFile(file, output);
-    await chmod(output, mode);
-  }
+  const parent = dirname(destination);
+  await mkdir(parent, { recursive: true });
+  const prefix = join(parent, ".plugin-build-");
+  // Windows mkdtemp needs the extended-length prefix. Keep the caller's path
+  // spelling for the compiler, publication, and cleanup.
+  const staging =
+    process.platform === "win32"
+      ? join(parent, basename(await mkdtemp(toNamespacedPath(prefix))))
+      : await mkdtemp(prefix);
+  const staged = join(staging, "bundle");
+  const previous = join(staging, "previous");
+  let preservePrevious = false;
+  try {
+    if (copiedPaths.length < files.length) {
+      const mcpApp = join(source, "mcp-app");
+      execFileSync(
+        process.execPath,
+        [
+          join(mcpApp, "scripts/build_mcp_app.mjs"),
+          "--output",
+          join(staged, "mcp"),
+        ],
+        { cwd: mcpApp, stdio: "inherit" },
+      );
+    }
+    for (const { file, mode, path } of sourceFiles) {
+      const output = join(staged, path);
+      await mkdir(dirname(output), { recursive: true });
+      await copyFile(file, output);
+      await chmod(output, mode);
+    }
 
-  const generated = await destinationFiles(destination);
-  const expected = [...files].sort();
-  if (
-    generated.length !== expected.length ||
-    generated.some((path, index) => path !== expected[index])
-  ) {
-    throw new Error("Bundled plugin generated files outside its contract.");
+    if (
+      !isDeepStrictEqual(await bundledPluginFiles(staged), [...files].sort())
+    ) {
+      throw new Error("Bundled plugin generated files outside its contract.");
+    }
+    await retryWindowsRename(
+      async () => {
+        try {
+          await rename(destination, previous);
+          preservePrevious = true;
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        await rename(staged, destination);
+      },
+      async () => {
+        // Keep the previous bundle available to readers during publication backoff.
+        if (preservePrevious) {
+          await retryWindowsRename(() => rename(previous, destination));
+          preservePrevious = false;
+        }
+      },
+    );
+    if (preservePrevious && process.platform === "win32") {
+      // A loaded addon can still prevent unlinking. Use the publication backoff
+      // for the whole old tree because recursive rm retries vary by runtime.
+      try {
+        await retryWindowsRename(() =>
+          rm(previous, { recursive: true, force: true }),
+        );
+      } catch (error) {
+        if (!["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+        console.warn(
+          `Published bundled plugin at ${destination}. Remove staging directory ${staging} after readers exit. ${error.message}`,
+        );
+        return files;
+      }
+    }
+    preservePrevious = false;
+  } finally {
+    // Retain the previous bundle if rollback fails or a reader keeps it open.
+    if (!preservePrevious) await rm(staging, { recursive: true, force: true });
   }
 
   return files;
 }
 
-const invokedPath = process.argv[1];
-if (
-  invokedPath !== undefined &&
-  pathToFileURL(resolve(invokedPath)).href === import.meta.url
-) {
+if (isMain(import.meta.url)) {
   buildBundledPlugin()
     .then((files) => {
       console.log(`Generated bundled plugin with ${files.length} files.`);

@@ -11,22 +11,23 @@ async function launch() {
     throw new Error("Cannot resolve CLI entrypoint.");
   }
   const cli = join(dirname(realpathSync(entrypoint)), "..", "dist", "cli.js");
-  const { main } = await import(pathToFileURL(cli).href);
-  return await main(
-    process.argv.slice(2),
-    process.stdout,
-    process.stderr,
-    undefined,
-    "bex-security",
-  );
+  const { runCli } = await import(pathToFileURL(cli).href);
+  return await runCli("bex-security");
 }
 
 void launch().then(
   (exitCode) => {
     process.exitCode = exitCode;
   },
-  () => {
-    process.stderr.write("bex-security: Failed to start Bex Security.\n");
+  (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const display = message.replaceAll(
+      /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u2028\u2029]/gu,
+      " ",
+    );
+    process.stderr.write(
+      `bex-security: Failed to start Bex Security: ${display}\n`,
+    );
     process.exitCode = 2;
   },
 );

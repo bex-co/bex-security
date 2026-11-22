@@ -378,41 +378,93 @@ export async function clearHostReviewCheckpoint(path: string): Promise<void> {
   await rm(path, { force: true });
 }
 
-/** Record files the host could not verify as deferred coverage in the draft
- * coverage artifact, so the sealed report states the gap instead of claiming
- * complete coverage. */
+/** Record files the host could not verify as deferred review work in the
+ * draft scan, so the sealed report states the gap instead of claiming the
+ * files were reviewed. Current drafts keep review state in the manifest;
+ * drafts that still reference a legacy coverage document keep it there. */
 export async function recordUncoveredCoverage(
   scanDirectory: string,
   uncoveredFiles: readonly UncoveredFile[],
   signal: AbortSignal,
 ): Promise<void> {
   if (uncoveredFiles.length === 0) return;
-  const path = join(scanDirectory, "coverage.json");
-  let coverage: unknown;
-  try {
-    coverage = JSON.parse(await readFile(path, { encoding: "utf8", signal }));
-  } catch (error) {
-    signal.throwIfAborted();
-    // A missing or malformed draft fails scan validation with its own message.
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    if (error instanceof SyntaxError) return;
-    throw error;
-  }
-  if (!isRecord(coverage)) return;
-  const deferred = Array.isArray(coverage["deferred"])
-    ? coverage["deferred"].filter(
-        (item) => !isRecord(item) || item["id"] !== UNCOVERED_DEFERRED_ID,
-      )
-    : [];
+  const manifestPath = join(scanDirectory, "scan-manifest.json");
+  const manifest = await readDraftJson(manifestPath, signal);
+  // A missing or malformed draft fails scan validation with its own message.
+  if (!isRecord(manifest) || !isRecord(manifest["scan"])) return;
+  const scan = manifest["scan"];
+  const legacyPath = join(scanDirectory, "coverage.json");
+  const legacy =
+    scan["reviewState"] === undefined && scan["coverageRef"] !== undefined
+      ? await readDraftJson(legacyPath, signal)
+      : undefined;
   const reasons = [...new Set(uncoveredFiles.map((file) => file.reason))];
-  deferred.push({
+  const item = {
     id: UNCOVERED_DEFERRED_ID,
     reason: `The agent did not produce completed read evidence for these files after every retry (${reasons.join("; ")}). Rerun the same scan to retry only these files.`,
     paths: uncoveredFiles.map((file) => file.path),
+  };
+  const withItem = (state: Record<string, unknown>) => {
+    const deferred = Array.isArray(state["deferred"])
+      ? state["deferred"].filter(
+          (entry) => !isRecord(entry) || entry["id"] !== UNCOVERED_DEFERRED_ID,
+        )
+      : [];
+    state["deferred"] = [...deferred, item];
+  };
+  if (isRecord(legacy)) {
+    withItem(legacy);
+    legacy["completeness"] = "partial";
+    await writeFile(legacyPath, `${JSON.stringify(legacy, null, 2)}\n`, {
+      signal,
+    });
+    return;
+  }
+  const reviewState = isRecord(scan["reviewState"])
+    ? scan["reviewState"]
+    : { surfaces: [], explicitExclusions: [], deferred: [] };
+  withItem(reviewState);
+  scan["reviewState"] = reviewState;
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+    signal,
   });
-  coverage["deferred"] = deferred;
-  coverage["completeness"] = "partial";
-  await writeFile(path, `${JSON.stringify(coverage, null, 2)}\n`, { signal });
+}
+
+/** True when sealed review state still lists unfinished work. */
+export function hasDeferredReview(manifest: {
+  scan: { reviewState?: Record<string, unknown> };
+}): boolean {
+  const reviewState = manifest.scan.reviewState;
+  if (!isRecord(reviewState) || !Array.isArray(reviewState["deferred"]))
+    return false;
+  const resolved = new Set(
+    (Array.isArray(reviewState["resolvedDeferred"])
+      ? reviewState["resolvedDeferred"]
+      : []
+    ).flatMap((entry) =>
+      isRecord(entry) && typeof entry["id"] === "string" ? [entry["id"]] : [],
+    ),
+  );
+  return reviewState["deferred"].some(
+    (entry) =>
+      !isRecord(entry) ||
+      typeof entry["id"] !== "string" ||
+      !resolved.has(entry["id"]),
+  );
+}
+
+async function readDraftJson(
+  path: string,
+  signal: AbortSignal,
+): Promise<unknown> {
+  try {
+    return JSON.parse(await readFile(path, { encoding: "utf8", signal }));
+  } catch (error) {
+    signal.throwIfAborted();
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
+  }
 }
 
 async function openCheckpoint(

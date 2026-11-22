@@ -1,14 +1,21 @@
+import { spawn } from "node:child_process";
 import { constants, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import {
+  configuredExecutableValue,
+  isExecutableFile,
+} from "./executable-path.ts";
 
 type PythonPlatform = NodeJS.Platform;
 
 interface ResolvePythonCommandOptions {
+  cacheDirectory?: string;
   configuredPython?: string;
   homeDirectory?: string;
   isUsableExecutable?: (candidate: string) => Promise<boolean>;
   platform?: PythonPlatform;
+  workingDirectory?: string;
 }
 
 const MISSING_PYTHON_HELPER_MESSAGE =
@@ -21,16 +28,46 @@ const MISSING_PYTHON_HELPER_MESSAGE =
 export async function resolvePythonCommand(
   options: ResolvePythonCommandOptions = {},
 ): Promise<string> {
-  const configuredPython = options.configuredPython ?? process.env.PYTHON;
-  if (configuredPython?.trim()) {
-    return configuredPython.trim();
+  if (
+    options.configuredPython === undefined &&
+    process.env.CODEX_SECURITY_PYTHON_COMMAND
+  ) {
+    return process.env.CODEX_SECURITY_PYTHON_COMMAND;
   }
-
   const platform = options.platform ?? process.platform;
+  const configuredPython = configuredExecutableValue(
+    options.configuredPython ?? process.env.PYTHON,
+    platform,
+    (value) =>
+      isExecutableFile(
+        value.startsWith("/")
+          ? value
+          : `${options.workingDirectory ?? process.cwd()}/${value}`,
+      ),
+  );
+  if (configuredPython) return configuredPython;
+
   const pathImplementation = platform === "win32" ? path.win32 : path.posix;
+  const systemPython = platform === "win32" ? "python" : "python3";
+  let cacheDirectory = options.cacheDirectory ?? process.env.XDG_CACHE_HOME;
+  if (!cacheDirectory) {
+    try {
+      cacheDirectory = pathImplementation.join(
+        options.homeDirectory ?? homedir(),
+        ".cache",
+      );
+    } catch (error) {
+      // A numeric Linux UID can have no home directory for the managed cache.
+      if (
+        platform === "linux" &&
+        (error as { info?: NodeJS.ErrnoException }).info?.code === "ENOENT"
+      )
+        return systemPython;
+      throw error;
+    }
+  }
   const bundledPythonRoot = pathImplementation.join(
-    options.homeDirectory ?? homedir(),
-    ".cache",
+    cacheDirectory,
     "codex-runtimes",
     "codex-primary-runtime",
     "dependencies",
@@ -55,7 +92,7 @@ export async function resolvePythonCommand(
       return candidate;
     }
   }
-  return platform === "win32" ? "python" : "python3";
+  return systemPython;
 }
 
 /**
@@ -67,8 +104,7 @@ export async function isUsablePythonExecutable(
   platform: PythonPlatform,
 ): Promise<boolean> {
   try {
-    const candidateStat = await fs.stat(candidate);
-    if (!candidateStat.isFile()) {
+    if (!(await fs.stat(candidate)).isFile()) {
       return false;
     }
     if (platform !== "win32") {
@@ -80,7 +116,7 @@ export async function isUsablePythonExecutable(
   }
 }
 
-/** Translate operating-system spawn failures without hiding Python process errors. */
+/** Add installation advice to missing-runtime errors without hiding their cause. */
 export function missingPythonHelperMessage(
   error: unknown,
   pythonCommand: string,
@@ -89,11 +125,59 @@ export function missingPythonHelperMessage(
     !error ||
     typeof error !== "object" ||
     !("code" in error) ||
-    typeof error.code !== "string" ||
+    error.code !== "ENOENT" ||
     !("path" in error) ||
     error.path !== pythonCommand
   ) {
     return undefined;
   }
-  return MISSING_PYTHON_HELPER_MESSAGE;
+  return `${error instanceof Error ? error.message : String(error)}\n${MISSING_PYTHON_HELPER_MESSAGE}`;
+}
+
+/** Run an existing Python helper with in-memory input and preserve its output. */
+export function runPythonWithInput(
+  python: string,
+  args: string[],
+  input: string | Buffer,
+  label: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(python, ["-B", ...args], {
+      signal,
+      killSignal: "SIGKILL",
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const output: string[] = [],
+      errors: string[] = [];
+    child.stdout
+      .setEncoding("utf8")
+      .on("data", (chunk: string) => output.push(chunk));
+    child.stderr
+      .setEncoding("utf8")
+      .on("data", (chunk: string) => errors.push(chunk));
+    let inputError: Error | undefined;
+    child.on("error", (error) => {
+      if (signal?.aborted) {
+        // A killed helper can remain in a kernel filesystem call until its mount responds.
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+      }
+      reject(error);
+    });
+    child.stdin.on("error", (error: Error) => {
+      inputError = error;
+    });
+    child.on("close", (code, signal) => {
+      const detail = errors.join("").trim();
+      if (code !== 0 && detail) reject(new Error(detail));
+      else if (inputError) reject(inputError);
+      else if (code === 0) resolve(output.join(""));
+      else reject(new Error(`${label} exited with ${signal ?? code}.`));
+    });
+    child.stdin.end(input);
+  });
 }

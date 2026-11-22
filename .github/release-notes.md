@@ -1,31 +1,20 @@
-<!-- release-version: 0.1.32 -->
+<!-- release-version: 0.10.1 -->
 
 <!-- release-section: highlights:start -->
+
 ## Highlights
 
-- return the Deep Scan ID in structured output ([#1026](https://github.com/openai/codex-security/pull/1026))
-- keep Deep Scan guidance in structured output ([#1029](https://github.com/openai/codex-security/pull/1029))
-- bump the third-party group across 2 directories with 4 updates ([#1032](https://github.com/openai/codex-security/pull/1032))
-- bump ruff from 0.16.7 to 0.16.8 in /plugins/codex-security ([#1022](https://github.com/openai/codex-security/pull/1022))
-- bump the codex group across 3 directories with 2 updates ([#1033](https://github.com/openai/codex-security/pull/1033))
-- patch vulnerable development dependencies ([#1034](https://github.com/openai/codex-security/pull/1034))
-- include Solidity sources in scan inventories ([#1021](https://github.com/openai/codex-security/pull/1021))
-- include Svelte components in scan inventories ([#1028](https://github.com/openai/codex-security/pull/1028))
-- propagate wizard cancellation to prompts ([#540](https://github.com/openai/codex-security/pull/540))
-- preserve explicit virtualenv launchers ([#227](https://github.com/openai/codex-security/pull/227))
-- upgrade Codex CLI and SDK to 0.157.1 ([#1041](https://github.com/openai/codex-security/pull/1041))
-- honor the requested output format when rerunning a scan ([#203](https://github.com/openai/codex-security/pull/203))
-- calculate diff digests at completion ([#1040](https://github.com/openai/codex-security/pull/1040))
-- preserve trusted Git selection in workbench helpers ([#140](https://github.com/openai/codex-security/pull/140))
-- create private scan output directories ([#987](https://github.com/openai/codex-security/pull/987))
-- require verification for no-change patches ([#1020](https://github.com/openai/codex-security/pull/1020))
-- bump the third-party group across 3 directories with 3 updates ([#1070](https://github.com/openai/codex-security/pull/1070))
-- bump the codex group across 3 directories with 2 updates ([#1076](https://github.com/openai/codex-security/pull/1076))
-- default CLI and SDK to GPT-6 Sol xhigh ([#1078](https://github.com/openai/codex-security/pull/1078))
+- **Exclude paths from scans.** Run `cs scan . --exclude-path examples/` to exclude a directory from review in Standard, Deep, or diff scans. Repeat the flag for more paths, or set `scan.exclude_paths` in your project configuration. Paths are literal and relative to the repository. The scanner can still read excluded files for context and filters out findings whose locations all fall under excluded paths.
+- **Import scanner findings.** Use `cs import continuum` to collect AWS Continuum code issues with their supporting evidence. Attack-path analysis can use observations from the tested target when assessing reachability and severity. You can also import saved CrowdStrike Falcon Cloud Security IaC reports into your local workbench.
+- **Deep Scan.** When Codex blocks a worker request because of a misalignment policy violation, Deep Scan now stops and reports the refusal without retrying the request.
+- **Threat modeling.** When a route appears in a test or on a deleted line, the threat-modeling instructions now ask the scanner to verify that the application still serves it.
+
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
+
 ## Upgrade notes
 
-Review compatibility and document any required migration steps before releasing.
+If you used the bundled AWS Continuum helper `collect_continuum.py`, switch to `cs import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root /absolute/checkout --format json`. For environments with multiple Git repositories or an S3 source, supply `--repository-name` with the AWS source name. Existing saved finding exports and patch captures remain compatible. [Collect a finding with patches](https://github.com/openai/codex-security/blob/npm-v0.10.1/docs/scanner-imports/continuum.md#collect-a-finding-with-patches)
+
 <!-- release-section: upgrades:end -->

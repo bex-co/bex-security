@@ -1,0 +1,36 @@
+name: Set up TypeScript tools
+description: Install the pinned package manager and Node.js runtime for repository tools.
+inputs:
+  node-version:
+    description: Node.js version for repository tools.
+    default: "22.13.0"
+  cache-dependency-path:
+    description: Lockfiles used for the pnpm store cache.
+    default: "sdk/typescript/pnpm-lock.yaml"
+  architecture:
+    description: Node.js architecture; empty selects the runner architecture.
+  compile:
+    description: Install the plugin dependencies and compile the native and CI tools.
+runs:
+  using: composite
+  steps:
+    - name: Set up pnpm
+      uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      with:
+        package_json_file: package.json
+    # setup-node saves its cache only after a successful job.
+    - name: Set up Node.js and pnpm cache
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: ${{ inputs.node-version }}
+        architecture: ${{ inputs.architecture }}
+        cache: pnpm
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
+    - name: Compile TypeScript tools
+      if: inputs.compile == 'true'
+      shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+      working-directory: .
+      run: |
+        pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+        ${{ runner.os == 'Windows' && 'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }' || '' }}
+        pnpm --dir plugins/codex-security/mcp-app exec tsc -p ../../../sdk/typescript/tsconfig.ci.json --typeRoots ./node_modules/@types

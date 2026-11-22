@@ -1,18 +1,23 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, toNamespacedPath } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PassThrough } from "node:stream";
 import { afterEach, expect, test } from "bun:test";
 import { sendFeedback } from "../src/feedback.js";
 import { codexSecurityCredentialHome } from "../src/runtime.js";
 import { VERSION, BUNDLED_PLUGIN_VERSION } from "../src/version.js";
+import { throwing } from "./support/errors.js";
+import { writeJsonLines } from "./support/json.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/feedback.mjs", import.meta.url),
 );
 const directories: string[] = [];
+const diagnostic = "Synthetic configuration failure: café 日本語";
 afterEach(async () => {
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
@@ -27,6 +32,7 @@ async function setup() {
     CODEX_CLI_PATH: process.execPath,
     FEEDBACK_REQUEST_FILE: join(directory, "requests.json"),
     FEEDBACK_SCENARIO: "success",
+    FEEDBACK_STDERR: `${diagnostic}\n`,
   };
   const home = codexSecurityCredentialHome(environment);
   await mkdir(join(home, "sessions"), { recursive: true });
@@ -38,10 +44,32 @@ async function setup() {
       source: { subagent: { thread_spawn: { parent_thread_id: "thread-1" } } },
     },
   };
-  await writeFile(
-    join(home, "sessions", "rollout-root.jsonl"),
-    JSON.stringify(root),
-  );
+  await writeJsonLines(join(home, "sessions", "rollout-root.jsonl"), [
+    root,
+    {
+      type: "event_msg",
+      timestamp: "2026-08-21T12:01:59Z",
+      payload: { type: "task_started", turn_id: "scan-turn" },
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-08-21T12:02:01Z",
+      payload: { type: "agent_message", message: "The scan is complete." },
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-08-21T12:03:00Z",
+      payload: { type: "task_started", turn_id: "configured-followup" },
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-08-21T12:03:01Z",
+      payload: {
+        type: "user_message",
+        message: "Configured follow-up prompt.",
+      },
+    },
+  ]);
   await writeFile(
     join(home, "sessions", "rollout-worker.jsonl"),
     JSON.stringify(worker),
@@ -72,6 +100,8 @@ async function setup() {
       includeLogs: true,
       scan: {
         scanId: "scan-1",
+        progress: { status: "complete" },
+        logCompletedAt: "2026-08-21T12:02:00Z",
         continuationThreadId: "thread-1",
         threadIds: ["thread-1"],
         executionThreadIds: ["thread-1"],
@@ -100,7 +130,6 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
   expect(requests[2].params).toMatchObject({
     classification: "bug",
     reason: "Scan stopped",
-    threadId: "thread-1",
     includeLogs: true,
     tags: {
       codex_security_version: VERSION,
@@ -108,15 +137,42 @@ test("uploads selected scan and worker logs through Codex and removes temporary 
       codex_security_scan_id: "scan-1",
     },
   });
+  expect(requests[2].params).not.toHaveProperty("threadId");
   expect(attachments).toHaveLength(1);
   expect(
     JSON.parse(attachments[0].content).sessions.map(
       (session: { threadId: string }) => session.threadId,
     ),
   ).toEqual(["thread-1", "worker-1"]);
+  expect(attachments[0].content).toContain("The scan is complete.");
+  expect(attachments[0].content).not.toContain("Configured follow-up prompt.");
   expect(existsSync(attachments[0].path)).toBe(false);
   context.expectClosed();
 });
+
+test.each([
+  ["complete", null],
+  ["running", "2026-08-21T12:02:00Z"],
+] as const)(
+  "uploads the full execution thread for a %s scan without an active log cutoff",
+  async (status, logCompletedAt) => {
+    const context = await setup();
+    await sendFeedback(
+      {
+        ...context.options,
+        scan: {
+          ...context.options.scan,
+          progress: { status },
+          logCompletedAt,
+        },
+      },
+      context.startCodex,
+    );
+    const { requests, attachments } = await context.transcript();
+    expect(requests[2].params.threadId).toBe("thread-1");
+    expect(attachments[0].content).toContain("Configured follow-up prompt.");
+  },
+);
 
 for (const missingParent of [false, true]) {
   test(`uploads only the selected Desktop scan logs with parent ${missingParent ? "missing" : "available"}`, async () => {
@@ -240,25 +296,75 @@ test("without log opt-in, does not read or attach saved sessions", async () => {
   ).toBe(false);
   const { requests, attachments } = await context.transcript();
   expect(requests[2].params.includeLogs).toBe(false);
+  expect(requests[2].params.threadId).toBe("thread-1");
   expect(requests[2].params.extraLogFiles).toEqual([]);
   expect(attachments).toEqual([]);
 });
 
-for (const [scenario, message] of [
+for (const [index, [scenario, message, stderr]] of [
   ["error", "Upload failed"],
-  ["exit", "Codex exited before feedback was uploaded"],
+  ["exit", "Codex exited before feedback was uploaded", ""],
+  ["exit-diagnostic", `  ${diagnostic}\n  `, `  ${diagnostic}\n  `],
+  ["exit-diagnostic", " \n\t", " \n\t"],
   ["missing-id", "Codex did not return a feedback ID"],
   ["malformed", "JSON"],
-]) {
-  test(`upload ${scenario} leaves no temporary logs or running child`, async () => {
+].entries()) {
+  test(`upload ${scenario} case ${index + 1} leaves no temporary logs or running child`, async () => {
     const context = await setup();
     context.environment.FEEDBACK_SCENARIO = scenario!;
+    if (stderr !== undefined) context.environment.FEEDBACK_STDERR = stderr;
     await expect(
       sendFeedback(context.options, context.startCodex),
     ).rejects.toThrow(message);
     const { attachments } = await context.transcript();
     expect(existsSync(attachments[0].path)).toBe(false);
     context.expectClosed();
+  });
+}
+
+for (const [index, stderr] of [
+  diagnostic,
+  `  ${diagnostic}\n  `,
+  " \n\t",
+  "",
+].entries()) {
+  test(`stdin failure case ${index + 1} preserves ${stderr ? "stderr through cleanup" : "the transport error without stderr"}`, async () => {
+    const context = await setup();
+    const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+    const bytes = Buffer.from(stderr);
+    const split = bytes.indexOf(0xc3) + 1;
+    let closed = false;
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => {
+        queueMicrotask(() => {
+          child.stderr.end(bytes.subarray(split));
+          child.stdout.end();
+          closed = true;
+          child.emit("close", 1, null);
+        });
+        return true;
+      },
+    });
+    const operation = sendFeedback(context.options, () => {
+      queueMicrotask(() => {
+        child.stderr.write(bytes.subarray(0, split));
+        child.stdin.emit("error", error);
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    if (stderr) {
+      await expect(operation).rejects.toMatchObject({
+        name: "CodexSecurityError",
+        message: stderr,
+        cause: error,
+      });
+    } else {
+      await expect(operation).rejects.toBe(error);
+    }
+    expect(closed).toBe(true);
   });
 }
 
@@ -270,9 +376,7 @@ test("respects disabled feedback without starting Codex", async () => {
     "[feedback]\nenabled = false\n",
   );
   await expect(
-    sendFeedback(context.options, () => {
-      throw new Error("Must not start Codex");
-    }),
+    sendFeedback(context.options, throwing("Must not start Codex")),
   ).rejects.toThrow("disabled by configuration");
 });
 

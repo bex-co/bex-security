@@ -4,12 +4,18 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
-import type { JsonObject } from "./config.js";
-import { CodexSecurityError, PluginBootstrapError } from "./errors.js";
+import { CODEX_AUTH_CONFIG_KEYS, type JsonObject } from "./config.js";
 import {
+  CodexSecurityError,
+  PluginBootstrapError,
+  errorMessage,
+} from "./errors.js";
+import {
+  beginCredentialLogin,
   executablePathForSpawn,
   expandHome,
   runCodexCommand,
+  writeCredentialHomeConfig,
   type CodexCommand,
   type ProcessEnvironment,
 } from "./runtime.js";
@@ -30,11 +36,23 @@ export function environmentEntry(
 }
 
 /** @internal */
+export function withoutOpenAiApiKeys<Value>(
+  environment: Record<string, Value>,
+): Record<string, Value> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
+  );
+}
+
+/** @internal */
 export function configuredCodexHome(environment: ProcessEnvironment): string {
+  const configured = environmentEntry(environment, "CODEX_HOME");
   return resolve(
     expandHome(
-      environmentEntry(environment, "CODEX_HOME")?.trim() ||
-        join(homedir(), ".codex"),
+      configured?.trim() ? configured : join(homedir(), ".codex"),
       environment,
     ),
   );
@@ -45,28 +63,28 @@ export async function readCodexHomeConfig(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<JsonObject> {
+  const path = join(configuredCodexHome(environment), "config.toml");
   try {
     return parse(
-      await readFile(join(configuredCodexHome(environment), "config.toml"), {
+      await readFile(path, {
         encoding: "utf8",
         signal,
       }),
+      { integersAsBigInt: "asNeeded" },
     ) as JsonObject;
   } catch (error) {
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw new CodexSecurityError(
-      "Could not read the configured Codex provider.",
+      `Could not read the configured Codex provider from ${path}: ${errorMessage(error)}`,
+      { cause: error },
     );
   }
 }
 
-export interface LoginResult {
-  success: boolean;
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-}
+export interface LoginResult extends Awaited<
+  ReturnType<typeof runCodexCommand>
+> {}
 
 export interface AccountStatus {
   authenticated: boolean;
@@ -96,14 +114,19 @@ export class CodexLoginHandle {
     args: readonly string[],
     environment: ProcessEnvironment,
     onSuccess: () => void | Promise<void>,
+    onFinish?: () => Promise<void>,
   ) {
     void this.#urlReady.promise.catch(() => undefined);
     void this.#deviceReady.promise.catch(() => undefined);
-    this.#child = spawn(executablePathForSpawn(command.command), [...args], {
-      env: environment,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    this.#child = spawn(
+      executablePathForSpawn(command.command),
+      [...(command.args ?? []), ...args],
+      {
+        env: environment,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
     this.#child.stdin.end();
     this.#child.stdout.setEncoding("utf8");
     this.#child.stderr.setEncoding("utf8");
@@ -113,7 +136,7 @@ export class CodexLoginHandle {
     this.#child.stderr.on("data", (chunk: string) => {
       this.#recordOutput("stderr", chunk);
     });
-    this.#completion = new Promise((resolve, reject) => {
+    this.#completion = new Promise<LoginResult>((resolve, reject) => {
       this.#child.once("close", (exitCode) => {
         clearTimeout(this.#forcedTermination);
         if (!this.#canceled) {
@@ -126,7 +149,9 @@ export class CodexLoginHandle {
         };
         this.#settleInstructionWaiters(result);
         if (result.success) {
-          Promise.resolve(onSuccess()).then(() => resolve(result), reject);
+          Promise.resolve()
+            .then(onSuccess)
+            .then(() => resolve(result), reject);
         } else {
           resolve(result);
         }
@@ -141,7 +166,7 @@ export class CodexLoginHandle {
         });
         reject(error);
       });
-    });
+    }).finally(onFinish);
   }
 
   public get loginId(): null {
@@ -173,8 +198,14 @@ export class CodexLoginHandle {
 
   public cancel(): void {
     this.#canceled = true;
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null)
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
+      // Descendants can retain inherited pipes after the login process exits.
+      // Cancellation must release those pipes so the close event can settle.
+      this.#child.stdin.destroy();
+      this.#child.stdout.destroy();
+      this.#child.stderr.destroy();
       return;
+    }
     this.#child.kill("SIGTERM");
     if (this.#forcedTermination !== undefined) return;
     this.#forcedTermination = setTimeout(() => {
@@ -270,14 +301,21 @@ export async function accountStatus(
   };
 }
 
+export function nativeLogoutArgs(store?: string): string[] {
+  return store === undefined
+    ? ["logout"]
+    : ["-c", `cli_auth_credentials_store=${JSON.stringify(store)}`, "logout"];
+}
+
 export async function logout(
   command: CodexCommand,
   environment: ProcessEnvironment,
   signal?: AbortSignal,
+  store?: string,
 ): Promise<void> {
   const result = await runCodexCommand(
     command,
-    ["logout"],
+    nativeLogoutArgs(store),
     environment,
     undefined,
     signal,
@@ -289,27 +327,50 @@ export async function logout(
   }
 }
 
-/** @internal Authentication settings shared by login and model commands. */
-export const CODEX_AUTH_CONFIG_KEYS = [
-  "cli_auth_credentials_store",
-  "forced_login_method",
-  "forced_chatgpt_workspace_id",
-] as const;
+/** Prepare native login under the credential-home lock, preserving unrelated settings. */
+export async function prepareLoginConfig(
+  credentialHome: string,
+  requested: JsonObject,
+): Promise<void> {
+  const config = await readCodexHomeConfig({ CODEX_HOME: credentialHome });
+  let changed = false;
+  for (const key of CODEX_AUTH_CONFIG_KEYS) {
+    const value = requested[key];
+    // Keep existing users in their native store until they select another.
+    if (key === "cli_auth_credentials_store" && value === undefined) continue;
+    if (config[key] === value) continue;
+    if (value === undefined) delete config[key];
+    else config[key] = value;
+    changed = true;
+  }
+  if (changed) await writeCredentialHomeConfig(credentialHome, config);
+  await beginCredentialLogin(credentialHome);
+}
 
 /** @internal Shared login recovery guidance for model commands. */
 export const NO_CREDENTIALS_MESSAGE =
-  "No credentials were found. Run 'codex-security login', use " +
-  "'codex-security login --device-auth' on a remote or headless machine, or set " +
-  "OPENAI_API_KEY or CODEX_API_KEY for CI.";
+  "No credentials were found. Run 'codex-security login'. On a remote or headless " +
+  "machine, use 'codex-security login --device-auth' if your workspace allows it. " +
+  "If device auth is disabled, see 'codex-security login --help' for browser login over SSH. " +
+  "For CI, set OPENAI_API_KEY or CODEX_API_KEY.";
 
 function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
     /https?:\/\/[^\s<>"']+/g,
   )) {
-    const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
+    // A bracket ending an IPv6 authority belongs to the URL, even in prose.
+    const candidate = match[0];
+    const ipv6Authority =
+      candidate.match(/^https?:\/\/(?:[^\\/?#]*@)?\[[\da-fA-F:.]+\]/)?.[0] ??
+      "";
+    const url =
+      ipv6Authority +
+      candidate.slice(ipv6Authority.length).replace(/[.,;:!?)\]}]+$/, "");
     try {
-      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
       if (
+        parsed.protocol === "https:" &&
         hostname !== "localhost" &&
         !hostname.endsWith(".localhost") &&
         !(isIP(hostname) === 4 && hostname.startsWith("127.")) &&
@@ -340,7 +401,7 @@ function userCodeFromOutput(value: string): string | null {
 
 function plainTerminalText(value: string): string {
   return value
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
 }

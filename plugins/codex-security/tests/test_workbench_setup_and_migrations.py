@@ -1,3 +1,5 @@
+"""Exercise workbench state setup and migration across historical schemas and conflicting histories."""
+
 from __future__ import annotations
 
 import argparse
@@ -5,12 +7,16 @@ import errno
 import json
 import os
 import runpy
+import shutil
 import sqlite3
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
+from threading import Timer
 from unittest import mock
 
 import pytest
@@ -20,15 +26,485 @@ from workbench_test_support import (
     configure_git_command,
     create_saved_git_workspace,
     create_saved_workspace,
+    create_workspace,
+    empty_target_paths,
+    empty_target_scan,
+    fail_scan,
+    get_scan,
     initialize_git_repository,
+    load_script,
+    mark_deep_coordinator_succeeded,
     run_workbench,
+    save_workspace,
+    scan_command,
     start_delivered_scan,
+    start_scan_command,
+    start_workspace_scan,
+    update_progress,
+    workspace_command,
     write_completed_contract,
 )
 
+SCHEMA = load_script("workbench_schema")
 
-def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> None:
-    source = tmp_path / "source.sqlite3"
+EXPECTED_MIGRATIONS = [
+    (1, "initial workbench schema"),
+    (2, "persist capability preflight summaries"),
+    (3, "finding management schema"),
+    (4, "scan handoff delivery claims"),
+    (5, "finding remediation action claims"),
+    (6, "thread-scoped workspaces"),
+    (7, "remediation host delivery state"),
+    (8, "sealed manifest digests"),
+    (9, "scan target filesystem identity"),
+    (10, "scan cancellation state"),
+    (11, "deep scan orchestration state"),
+    (12, "scan continuation threads"),
+    (13, "scan scope file counts"),
+    (14, "imported triage results"),
+    (15, "append-only finding decisions"),
+    (16, "stable repository targets"),
+    (17, "scan target summaries"),
+    (18, "clear legacy delivered handoff claims"),
+    (19, "persist setup workspace preference"),
+    (20, "phase-specific scan progress"),
+    (21, "current scan preflight state"),
+    (22, "replayable scan launch recipes"),
+    (23, "semantic scan comparison matches"),
+    (24, "persist scan cost estimates"),
+    (25, "persist scan model settings"),
+    (26, "persist scan completion warnings"),
+    (27, "persist deep scan consecutive discovery failures"),
+    (28, "persist deep scan discovery time limit"),
+    (29, "persist finding publication associations"),
+    (30, "preserve team-only finding publication associations"),
+    (31, "freeze stopped scan source digests"),
+    (32, "separate deep scan publication failures"),
+    (33, "store complete findings and embeddings without a scan"),
+    (34, "associate findings with repositories"),
+    (35, "persist finding dedupe groups"),
+    (36, "persist local findings workflows"),
+    (37, "checkpoint validated dedupe reviews"),
+    (38, "store findings workflow metadata in columns"),
+    (39, "store dedupe checkpoint bindings in columns"),
+    (40, "index finding identity and comparison history"),
+    (41, "checkpoint finding severity assessments"),
+    (42, "editable scan names"),
+    (43, "preserve severity assessments per scan"),
+    (44, "version local finding embedding inputs"),
+    (45, "separate local and service embedding caches"),
+    (46, "invalidate local embeddings when finding bodies change"),
+    (47, "snapshot deep scan discovery context"),
+    (48, "share finding issue receipts across trackers"),
+    (49, "index finding issue receipt ownership"),
+    (50, "persist authorized source excerpt scopes"),
+    (51, "preserve deep scan worker thread history"),
+    (52, "record severity classification review counts"),
+    (53, "store external source findings without assessments"),
+    (54, "snapshot deep scan setup configuration"),
+    (55, "retain undelivered headless deep scan results"),
+    (56, "recover unfinished legacy headless deep scans"),
+    (57, "freeze stopped scan checkpoint selections"),
+    (58, "record the final Deep Scan reviewed surface count"),
+    (59, "retain the launching Deep Scan service tier"),
+    (60, "record classification rubric provenance"),
+    (61, "record scan launch attribution"),
+    (62, "project scan lifecycle snapshots"),
+    (63, "retain unverified Deep Scan worker attempts"),
+    (64, "persist scan log completion boundaries"),
+    (65, "bind Windows Deep Scan resume output directories"),
+    (66, "bind Windows Deep Scan resume checkouts"),
+    (67, "persist repository identities"),
+    (68, "stabilize Linux repository generations"),
+    (69, "distinguish unvalidated workspace targets"),
+    (70, "retain checkout roots for Git discovery"),
+    (71, "retain rejected workspace checkout boundaries"),
+    (72, "retain external finding import selections and provenance"),
+]
+
+
+@pytest.mark.parametrize(
+    "code", [errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST]
+)
+def test_state_directory_failure_preserves_original_exception(
+    workbench_api, tmp_path, code, capsys
+):
+    error = OSError(code, os.strerror(code), str(tmp_path / "state"))
+    connect = workbench_api["connect"]
+    with (
+        mock.patch.dict(
+            connect.__globals__,
+            {
+                "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                "create_private_directory": mock.Mock(side_effect=error),
+            },
+        ),
+        pytest.raises(OSError) as failure,
+    ):
+        connect()
+    assert str(failure.value) == str(error)
+    assert failure.value is error
+    detail = capsys.readouterr().err
+    assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+    assert "SQLite journal files" in detail
+    assert "CODEX_SECURITY_STATE_DIR" in detail
+
+
+@pytest.mark.parametrize("during_open", [True, False])
+def test_state_open_or_migration_failure_preserves_original_exception(
+    workbench_api, tmp_path, during_open, capsys
+):
+    error = sqlite3.OperationalError("unable to open database file")
+    connect = workbench_api["connect"]
+    connection = sqlite3.connect(":memory:")
+    try:
+        with (
+            mock.patch.dict(
+                connect.__globals__,
+                {
+                    "database_path": lambda: tmp_path / "state" / "workbench.sqlite3",
+                    "apply_migrations": mock.Mock(side_effect=error),
+                },
+            ),
+            mock.patch.object(
+                sqlite3,
+                "connect",
+                side_effect=error if during_open else None,
+                return_value=connection,
+            ),
+            pytest.raises(sqlite3.OperationalError) as failure,
+        ):
+            connect()
+        assert failure.value is error
+        assert str(error) == "unable to open database file"
+        detail = capsys.readouterr().err
+        assert str(tmp_path / "state" / "workbench.sqlite3") in detail
+        assert "SQLite journal files" in detail
+        assert "CODEX_SECURITY_STATE_DIR" in detail
+    finally:
+        connection.close()
+
+
+def create_historical_database(
+    before_version: int,
+    extra_migrations: tuple[tuple[int, str, str], ...] = (),
+) -> tuple[sqlite3.Connection, Callable[[sqlite3.Connection], None]]:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    apply_migrations = namespace["apply_migrations"]
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    historical_migrations = (
+        *(migration for migration in namespace["MIGRATIONS"] if migration[0] < before_version),
+        *extra_migrations,
+    )
+    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
+        apply_migrations(connection)
+    return connection, apply_migrations
+
+
+@pytest.mark.parametrize("reopened", [False, True])
+def test_repository_previews_52_and_53_preserve_classification_and_import_schema(reopened) -> None:
+    connection, migrate = create_historical_database(52)
+    for preview, (canonical, name, sql) in zip((52, 53), SCHEMA.MIGRATIONS[66:68], strict=True):
+        apply_historical_migrations(connection, ((preview, name, sql),), "preview-time")
+        if reopened:
+            record_migration(connection, canonical, name, "later-open")
+
+    for _ in range(2):
+        migrate(connection)
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            )
+        ] == [(version, name) for version, name, _ in SCHEMA.MIGRATIONS]
+        for table in (
+            "finding_severity_assessments",
+            "scan_severity_assessments",
+            "scan_severity_classifications",
+        ):
+            assert "classification_runs" in {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+        assert connection.execute("SELECT COUNT(*) FROM external_source_reports").fetchone()[0] == 0
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT applied_at FROM schema_migrations WHERE version IN (67, 68)"
+            )
+        } == {"preview-time"}
+
+
+@pytest.mark.parametrize(
+    ("prefix_version", "reopened"),
+    [
+        (54, False),
+        (54, True),
+        (58, False),
+        (58, True),
+        (61, False),
+        (61, True),
+        (63, False),
+        (64, False),
+        (67, False),
+    ],
+)
+def test_scan_git_preview_upgrades_to_released_repository_identity(prefix_version, reopened):
+    connection, migrate = create_historical_database(prefix_version)
+    for offset, (name, column) in enumerate(
+        (
+            ("save scan target Git positions", "target_git_prefix"),
+            ("save scan Git repository identities", "target_git_identity_json"),
+        )
+    ):
+        version = prefix_version + offset
+        migration = (version, name, f"ALTER TABLE scans ADD COLUMN {column} TEXT;")
+        apply_historical_migrations(connection, (migration,), "preview")
+        if reopened and version in (54, 55, 58, 59, 61):
+            for statement in SCHEMA.sql_statements(SCHEMA.MIGRATIONS[version - 1][2]):
+                connection.execute(statement)
+    insert_historical_row(connection, "workspaces", "preview", id="legacy-workspace")
+    insert_legacy_scan(
+        connection, "preview", target_git_prefix="src", target_git_identity_json="{}"
+    )
+
+    migrate(connection)
+    migrate(connection)
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        )
+    ] == EXPECTED_MIGRATIONS
+    assert tuple(
+        connection.execute(
+            "SELECT target_git_prefix, target_git_identity_json FROM scans WHERE id = 'legacy-scan'"
+        ).fetchone()
+    ) == ("src", "{}")
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_repository_preview_history_keeps_original_application_times_after_budget_upgrade():
+    connection, migrate = create_historical_database(72)
+    connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
+    connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
+    connection.execute("DELETE FROM schema_migrations WHERE version = 63")
+    for column in (
+        "log_completed_at",
+        "windows_resume_output_identity",
+        "windows_resume_target_identity",
+    ):
+        connection.execute(f"ALTER TABLE scans DROP COLUMN {column}")
+    connection.execute("DELETE FROM schema_migrations WHERE version BETWEEN 64 AND 66")
+    for version in range(67, 72):
+        connection.execute(
+            "UPDATE schema_migrations SET version = ?, applied_at = ? WHERE version = ?",
+            (version - 4, f"preview-{version - 4}", version),
+        )
+
+    migrate(connection)
+    migrate(connection)
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, applied_at FROM schema_migrations "
+            "WHERE version BETWEEN 67 AND 71 ORDER BY version"
+        )
+    ] == [(version, f"preview-{version - 4}") for version in range(67, 72)]
+    assert (
+        connection.execute("SELECT name FROM schema_migrations WHERE version = 63").fetchone()[0]
+        == "retain unverified Deep Scan worker attempts"
+    )
+    assert "worker_usage_gap" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
+
+
+def insert_historical_row(
+    connection: sqlite3.Connection, table: str, timestamp: str, **columns: object
+) -> None:
+    columns.update(created_at=timestamp, updated_at=timestamp)
+    names = ", ".join(columns)
+    parameters = ", ".join("?" for _ in columns)
+    connection.execute(
+        f"INSERT INTO {table} ({names}) VALUES ({parameters})", tuple(columns.values())
+    )
+
+
+def insert_legacy_scan(connection: sqlite3.Connection, timestamp: str, **overrides: object) -> None:
+    columns = {
+        "id": "legacy-scan",
+        "workspace_id": "legacy-workspace",
+        "target_path": "/legacy/target",
+        "target_revision": "legacy-revision",
+        "scope": ".",
+        "mode": "standard",
+        "scan_dir": "/legacy/scan",
+        "status": "running",
+        "phase": "discovery",
+        "started_at": timestamp,
+    }
+    insert_historical_row(connection, "scans", timestamp, **(columns | overrides))
+
+
+def rename_migration(connection: sqlite3.Connection, version: int, name: str) -> None:
+    connection.execute("UPDATE schema_migrations SET name = ? WHERE version = ?", (name, version))
+
+
+def record_migration(
+    connection: sqlite3.Connection, version: int, name: str, timestamp: str
+) -> None:
+    connection.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+        (version, name, timestamp),
+    )
+
+
+def migration_name_row(connection: sqlite3.Connection, version: int):
+    return connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = ?", (version,)
+    ).fetchone()
+
+
+def create_migration_history(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )
+        """
+    )
+
+
+def apply_historical_migrations(
+    connection: sqlite3.Connection,
+    migrations: Iterable[tuple[int, str, str]],
+    timestamp: str,
+) -> None:
+    for version, name, sql in migrations:
+        for statement in SCHEMA.sql_statements(sql):
+            connection.execute(statement)
+        record_migration(connection, version, name, timestamp)
+
+
+def add_legacy_profile_columns(connection: sqlite3.Connection, *, dynamic: bool) -> tuple[str, str]:
+    if dynamic:
+        model = "codex-next/security-pro"
+        effort = "adaptive_depth"
+        model_definition = """
+            TEXT CHECK (
+                execution_model IS NULL
+                OR (
+                    execution_model = trim(execution_model)
+                    AND length(execution_model) BETWEEN 1 AND 128
+                )
+            )
+        """
+        effort_definition = """
+            TEXT CHECK (
+                (reasoning_effort IS NULL
+                 OR (
+                    reasoning_effort = trim(reasoning_effort)
+                    AND length(reasoning_effort) BETWEEN 1 AND 64
+                 ))
+                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
+            )
+        """
+    else:
+        model = "gpt-5.5"
+        effort = "high"
+        model_definition = """
+            TEXT CHECK (
+                execution_model IS NULL
+                OR execution_model IN ('gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5')
+            )
+        """
+        effort_definition = """
+            TEXT CHECK (
+                (reasoning_effort IS NULL
+                 OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh'))
+                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
+            )
+        """
+    for table in ("workspaces", "scans"):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model {model_definition}")
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN reasoning_effort {effort_definition}")
+    return model, effort
+
+
+def insert_legacy_profile_scan(
+    connection: sqlite3.Connection,
+    tmp_path: Path,
+    model: str,
+    effort: str,
+    timestamp: str,
+) -> tuple[str, str]:
+    workspace_id, scan_id = str(uuid.uuid4()), str(uuid.uuid4())
+    insert_historical_row(
+        connection,
+        "workspaces",
+        timestamp,
+        id=workspace_id,
+        target_path=str(tmp_path / "target"),
+        default_mode="standard",
+        execution_model=model,
+        reasoning_effort=effort,
+    )
+    insert_legacy_scan(
+        connection,
+        timestamp,
+        id=scan_id,
+        workspace_id=workspace_id,
+        target_path=str(tmp_path / "target"),
+        scan_dir=str(tmp_path / "legacy-scan"),
+        execution_model=model,
+        reasoning_effort=effort,
+    )
+    return workspace_id, scan_id
+
+
+def assert_new_scan_model_is_independent(state_dir: Path, target: Path, scan_root: Path) -> None:
+    current_workspace = create_saved_workspace(state_dir, target)
+    current_scan = start_delivered_scan(
+        state_dir,
+        str(current_workspace["id"]),
+        "--scan-root",
+        str(scan_root),
+        "--model",
+        "gpt-5.6-sol",
+    )
+    current_scan_id = str(current_scan["scanId"])
+    assert current_scan["reasoningEffort"] is None
+    update_progress(state_dir, current_scan_id, "--reasoning-effort", "high")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            """
+            SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort
+            FROM scans WHERE id = ?
+            """,
+            (current_scan_id,),
+        ).fetchone() == (None, None, "gpt-5.6-sol", "high")
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    [
+        b"source.sqlite3",
+        pytest.param(
+            b"source-\xff?#%.sqlite3",
+            marks=pytest.mark.skipif(
+                sys.platform != "linux", reason="requires Linux filename bytes"
+            ),
+            id="linux-filename-bytes",
+        ),
+    ],
+)
+def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(
+    tmp_path: Path, source_name: bytes
+) -> None:
+    source = tmp_path / os.fsdecode(source_name)
     snapshot = tmp_path / "snapshot.sqlite3"
     with sqlite3.connect(source) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
@@ -41,6 +517,166 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
             check=True,
         )
     with sqlite3.connect(snapshot) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX file permission bits")
+@pytest.mark.parametrize("destination_kind", ["regular", "symlink", "symlink-chain"])
+@pytest.mark.parametrize("umask", [0o022, 0o777])
+@pytest.mark.parametrize("malformed_source", [False, True])
+def test_sqlite_snapshot_new_destination_is_private_during_backup(
+    tmp_path: Path, destination_kind: str, umask: int, malformed_source: bool
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    links = []
+    if destination_kind != "regular":
+        target = tmp_path / "target.sqlite3"
+        if destination_kind == "symlink-chain":
+            intermediate = tmp_path / "intermediate.sqlite3"
+            intermediate.symlink_to(target.name)
+            links.append(intermediate)
+            target = intermediate
+        snapshot.symlink_to(target.name)
+        links.append(snapshot)
+    link_inodes = {link: link.lstat().st_ino for link in links}
+    if malformed_source:
+        source.write_text("not a SQLite database")
+    else:
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO records VALUES ('sealed')")
+    namespace = runpy.run_path(str(SNAPSHOT_SCRIPT))
+    real_connect = sqlite3.connect
+    modes = []
+
+    def observe_connect(database, *args, **kwargs):
+        if database == snapshot:
+            modes.append(snapshot.stat().st_mode & 0o777 if snapshot.exists() else None)
+        return real_connect(database, *args, **kwargs)
+
+    previous_umask = os.umask(umask)
+    try:
+        with (
+            mock.patch.object(sys, "argv", [str(SNAPSHOT_SCRIPT), str(source), str(snapshot)]),
+            mock.patch.object(sqlite3, "connect", side_effect=observe_connect),
+        ):
+            if malformed_source:
+                with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+                    namespace["main"]()
+            else:
+                namespace["main"]()
+    finally:
+        os.umask(previous_umask)
+    assert modes == [0o600]
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+    for link, inode in link_inodes.items():
+        assert link.is_symlink()
+        assert link.lstat().st_ino == inode
+    if not malformed_source:
+        with sqlite3.connect(snapshot) as connection:
+            assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX file permission bits")
+@pytest.mark.parametrize("destination_kind", ["regular", "symlink", "hardlink"])
+@pytest.mark.parametrize("malformed_source", [False, True])
+def test_sqlite_snapshot_preserves_existing_destination(
+    tmp_path: Path, destination_kind: str, malformed_source: bool
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    existing = tmp_path / "existing.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    if malformed_source:
+        source.write_text("not a SQLite database")
+    else:
+        with sqlite3.connect(source) as connection:
+            connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+            connection.execute("INSERT INTO records VALUES ('sealed')")
+    with sqlite3.connect(existing) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('original')")
+    existing.chmod(0o644)
+    if destination_kind == "symlink":
+        snapshot.symlink_to(existing)
+    elif destination_kind == "hardlink":
+        snapshot.hardlink_to(existing)
+    else:
+        snapshot = existing
+    original_inode = existing.stat().st_ino
+    namespace = runpy.run_path(str(SNAPSHOT_SCRIPT))
+    real_connect = sqlite3.connect
+    modes = []
+
+    def observe_connect(database, *args, **kwargs):
+        connection = real_connect(database, *args, **kwargs)
+        if database == snapshot:
+            modes.append(snapshot.stat().st_mode & 0o777)
+        return connection
+
+    with (
+        mock.patch.object(sys, "argv", [str(SNAPSHOT_SCRIPT), str(source), str(snapshot)]),
+        mock.patch.object(sqlite3, "connect", side_effect=observe_connect),
+    ):
+        if malformed_source:
+            with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+                namespace["main"]()
+        else:
+            namespace["main"]()
+    assert modes == [0o644]
+    assert snapshot.stat().st_mode & 0o777 == (0o644 if malformed_source else 0o600)
+    assert snapshot.stat().st_ino == existing.stat().st_ino == original_inode
+    assert snapshot.is_symlink() == (destination_kind == "symlink")
+    with sqlite3.connect(existing) as connection:
+        expected = "original" if malformed_source else "sealed"
+        assert connection.execute("SELECT value FROM records").fetchone() == (expected,)
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Win32 extended-length paths")
+def test_sqlite_snapshot_reads_windows_extended_length_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('sealed')")
+    subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), "\\\\?\\" + str(source), str(snapshot)],
+        check=True,
+    )
+    with sqlite3.connect(snapshot) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+@pytest.mark.parametrize("alias_kind", ["same", "symlink", "hardlink"])
+def test_sqlite_snapshot_rejects_destination_aliasing_source(
+    tmp_path: Path, alias_kind: str
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('sealed')")
+        connection.commit()
+    destination = source
+    if alias_kind != "same":
+        destination = tmp_path / "alias.sqlite3"
+        if alias_kind == "symlink":
+            try:
+                destination.symlink_to(source)
+            except OSError as error:
+                pytest.skip(f"creating a symbolic link requires host support: {error}")
+        else:
+            destination.hardlink_to(source)
+    completed = subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), str(source), str(destination)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert "same file as source" in completed.stderr
+    with sqlite3.connect(source) as connection:
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
 
@@ -163,14 +799,12 @@ def test_workbench_does_not_run_fsmonitor_during_scan_start(tmp_path: Path) -> N
     marker.unlink()
 
     saved = create_saved_git_workspace(state_dir, target)
-    run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
+    start_scan_command(state_dir, str(saved["id"]))
     assert not marker.exists()
 
 
 def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     (target / "source.py").write_text("print('fixture')\n")
     workspace = create_saved_workspace(state_dir, target)
     database = state_dir / "workbench.sqlite3"
@@ -204,11 +838,7 @@ def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path)
     assert started["results"]["progress"]["coverage"]["filesTotal"] == 1
 
 
-def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    dependency = tmp_path / "dependency"
-    initialize_git_repository(dependency)
-    target = tmp_path / "target"
+def initialize_git_repository_with_submodule(target: Path, dependency: Path) -> None:
     initialize_git_repository(target)
     subprocess.run(
         [
@@ -225,16 +855,18 @@ def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
         check=True,
     )
     subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+
+
+def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    dependency = tmp_path / "dependency"
+    initialize_git_repository(dependency)
+    target = tmp_path / "target"
+    initialize_git_repository_with_submodule(target, dependency)
     saved = create_saved_git_workspace(state_dir, target)
     (target / "vendor/dependency/README.md").write_text("dirty dependency\n")
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        check=False,
-    )
+    failed = start_scan_command(state_dir, str(saved["id"]), check=False)
 
     assert failed["returncode"] != 0
     assert "Dirty Git submodules are not supported" in str(failed["stderr"])
@@ -245,22 +877,7 @@ def test_scan_start_allows_uninitialized_submodule(tmp_path: Path) -> None:
     dependency = tmp_path / "dependency"
     initialize_git_repository(dependency)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     subprocess.run(
         ["git", "submodule", "deinit", "-f", "-q", "--", "vendor/dependency"],
         cwd=target,
@@ -269,12 +886,7 @@ def test_scan_start_allows_uninitialized_submodule(tmp_path: Path) -> None:
     assert not (target / "vendor/dependency/.git").exists()
     saved = create_saved_git_workspace(state_dir, target)
 
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-    )
+    started = start_scan_command(state_dir, str(saved["id"]))
 
     assert started["results"]["progress"]["status"] == "running"
 
@@ -286,22 +898,7 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     (dependency / "README.md").write_text("second revision\n")
     subprocess.run(["git", "commit", "-qam", "Second revision"], cwd=dependency, check=True)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     submodule = target / "vendor/dependency"
     subprocess.run(["git", "checkout", "-q", revision_a], cwd=submodule, check=True)
     subprocess.run(
@@ -311,62 +908,46 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     )
     saved = create_saved_git_workspace(state_dir, target)
 
-    failed = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(saved["id"]),
-        check=False,
-    )
+    failed = start_scan_command(state_dir, str(saved["id"]), check=False)
 
     assert failed["returncode"] != 0
     assert "revision recorded by the parent repository" in str(failed["stderr"])
 
 
-def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("target_name", "outside_name"),
+    [
+        pytest.param(":(top,glob)**", "outside.py", id="top-glob", marks=pytest.mark.native_macos),
+        pytest.param(
+            "selected[ab]", "selecteda", id="bracket-glob", marks=pytest.mark.cross_platform
+        ),
+    ],
+)
+def test_nested_target_name_is_a_literal_git_pathspec(
+    tmp_path: Path, target_name: str, outside_name: str
+) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
-    target = repository / ":(top,glob)**"
-    target.mkdir()
+    target = repository / target_name
+    try:
+        target.mkdir()
+    except OSError as error:
+        if target_name == ":(top,glob)**" and error.errno == errno.EINVAL:
+            pytest.skip("The filesystem cannot create a directory with Git top/glob magic.")
+        raise
+    outside = repository / outside_name
     (target / "source.py").write_text("selected = True\n")
-    (repository / "outside.py").write_text("outside = 1\n")
+    outside.write_text("outside = 1\n")
     subprocess.run(["git", "add", "."], cwd=repository, check=True)
     subprocess.run(["git", "commit", "-qm", "Add selected target"], cwd=repository, check=True)
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repository, text=True
     ).strip()
-    workspace_id = str(uuid.uuid4())
-    run_workbench(
-        state_dir,
-        "create-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-    )
-    run_workbench(
-        state_dir,
-        "save-workspace",
-        "--workspace-id",
-        workspace_id,
-        "--target-path",
-        str(target),
-        "--scope",
-        ".",
-        "--mode",
-        "standard",
-    )
-    started = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
-    scan_id = str(started["results"]["scanId"])
-    scan_dir = Path(str(started["results"]["scanDir"]))
-    (repository / "outside.py").write_text("outside = 2\n")
+    workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
+    scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
+    outside.write_text("outside = 2\n")
+    assert get_scan(state_dir, scan_id, "--check-target")["scan"]["scanId"] == scan_id
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -376,7 +957,7 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
         target_revision=revision,
     )
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
 
 
@@ -396,8 +977,21 @@ def test_workbench_defaults_to_persistent_codex_home_state(tmp_path: Path) -> No
     }
 
 
-def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) -> None:
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: bool) -> None:
     state_dir = tmp_path / "state"
+    if upgrade:
+        state_dir.mkdir()
+        namespace = runpy.run_path(str(SCRIPT), run_name="concurrent_migration_upgrade")
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            namespace["apply_schema_migrations"](
+                connection,
+                tuple(migration for migration in namespace["MIGRATIONS"] if migration[0] <= 32),
+                namespace["now"],
+                namespace["backfill_security_targets"],
+            )
+            connection.execute("PRAGMA journal_mode=WAL")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: run_workbench(state_dir, "database-info"), range(2)))
     assert results == [
@@ -405,7 +999,71 @@ def test_workbench_serializes_concurrent_first_run_migrations(tmp_path: Path) ->
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            len(EXPECTED_MIGRATIONS),
+        )
+
+
+def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    scan_command(state_dir, "complete-scan", scan_id)
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE finding_occurrences SET details_json = '{}' WHERE scan_id = ?", (scan_id,)
+        )
+
+    # Hold admission beyond one busy timeout, as a large registration hash can.
+    connection = sqlite3.connect(database, check_same_thread=False)
+    connection.execute("BEGIN IMMEDIATE")
+    release = Timer(7, connection.rollback)
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            release.start()
+            started = pool.submit(
+                run_workbench,
+                state_dir,
+                "start-prompt-only-scan",
+                "--thread-id",
+                "concurrent-thread",
+                "--target-path",
+                str(target),
+                "--scope",
+                ".",
+                "--mode",
+                "standard",
+                "--target-summary",
+                "Fixture",
+                "--scan-root",
+                str(tmp_path / "scans"),
+            )
+            updated = pool.submit(
+                run_workbench,
+                state_dir,
+                "set-scan-thread",
+                "--scan-id",
+                scan_id,
+                "--thread-id",
+                "updated-thread",
+            )
+            backfilled = pool.submit(run_workbench, state_dir, "get-scan", "--scan-id", scan_id)
+            assert started.result(timeout=15)["startDisposition"] == "created"
+            assert updated.result(timeout=15)["threadId"] == "updated-thread"
+            assert (
+                backfilled.result(timeout=15)["scan"]["findings"][0]["attackPath"]["impact"][
+                    "level"
+                ]
+                == "high"
+            )
+    finally:
+        release.cancel()
+        release.join()
+        connection.close()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT details_json != '{}' FROM finding_occurrences WHERE scan_id = ?", (scan_id,)
+        ).fetchone() == (1,)
 
 
 @pytest.mark.parametrize("previous_history", ["main", "comparison-preview"])
@@ -470,6 +1128,135 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def insert_classified_scan(
+    connection: sqlite3.Connection, scan_id: str, finding_ids: list[str], timestamp: str
+) -> None:
+    insert_legacy_scan(
+        connection,
+        timestamp,
+        id=scan_id,
+        workspace_id="workspace",
+        target_path="/target",
+        target_revision="revision",
+        scan_dir=f"/scans/{scan_id}",
+        status="complete",
+        phase="reporting",
+    )
+    connection.execute(
+        "INSERT INTO scan_severity_classifications (scan_id, finding_ids_json, assessed_at) "
+        "VALUES (?, ?, ?)",
+        (scan_id, json.dumps(finding_ids), timestamp),
+    )
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_severity_migration_only_copies_assessments_with_matching_scan_occurrences(
+    indexed: bool,
+) -> None:
+    connection, apply_migrations = create_historical_database(43)
+    timestamp = "2026-09-01T00:00:00Z"
+    with connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        insert_historical_row(connection, "workspaces", timestamp, id="workspace")
+        for scan_id in ("first-scan", "second-scan"):
+            insert_classified_scan(connection, scan_id, ["finding"], timestamp)
+        connection.execute(
+            """INSERT INTO findings
+                (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+                VALUES ('finding', 'fingerprint', 'rule', 'anchor', ?, ?)""",
+            (timestamp, timestamp),
+        )
+        connection.execute(
+            """INSERT INTO finding_severity_assessments
+                (finding_id, occurrence_id, input_sha256, assessed_at, source, decision,
+                    level, rationale)
+                VALUES ('finding', 'second-occurrence', 'digest', ?, 'existing-severity',
+                    'assessed', 'high', 'Saved severity')""",
+            (timestamp,),
+        )
+        if indexed:
+            connection.execute(
+                """INSERT INTO finding_occurrences
+                    (id, finding_id, scan_id, title, summary, severity, confidence,
+                        remediation, created_at)
+                    VALUES ('second-occurrence', 'finding', 'second-scan', 'Title', 'Summary',
+                        'high', 'high', 'Remediation', ?)""",
+                (timestamp,),
+            )
+
+        apply_migrations(connection)
+        apply_migrations(connection)
+
+        migrated = connection.execute(
+            "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
+        ).fetchall()
+        assert [tuple(row) for row in migrated] == (
+            [("second-scan", "second-occurrence")] if indexed else []
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_severity_migration_scales_with_classified_scans() -> None:
+    timestamp = "2026-09-01T00:00:00Z"
+
+    def instruction_count(scale: int) -> int:
+        connection, apply_migrations = create_historical_database(43)
+        with closing(connection):
+            connection.execute("PRAGMA foreign_keys = ON")
+            insert_historical_row(connection, "workspaces", timestamp, id="workspace")
+            scan_count, findings_per_scan = scale, 10
+            for scan in range(scan_count):
+                scan_id = f"scan-{scan}"
+                finding_ids = [f"finding-{scan}-{item}" for item in range(findings_per_scan)]
+                insert_classified_scan(connection, scan_id, finding_ids, timestamp)
+                for finding_id in finding_ids:
+                    occurrence_id = f"occurrence-{finding_id}"
+                    connection.execute(
+                        """INSERT INTO findings
+                            (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+                            VALUES (?, ?, 'rule', 'anchor', ?, ?)""",
+                        (finding_id, finding_id, timestamp, timestamp),
+                    )
+                    connection.execute(
+                        """INSERT INTO finding_occurrences
+                            (id, finding_id, scan_id, title, summary, severity, confidence,
+                                remediation, created_at)
+                            VALUES (?, ?, ?, 'Title', 'Summary', 'high', 'high', 'Remediation', ?)""",
+                        (occurrence_id, finding_id, scan_id, timestamp),
+                    )
+                    connection.execute(
+                        """INSERT INTO finding_severity_assessments
+                            (finding_id, occurrence_id, input_sha256, assessed_at, source,
+                                decision, level, rationale)
+                            VALUES (?, ?, 'digest', ?, 'existing-severity', 'assessed',
+                                'high', 'Saved severity')""",
+                        (finding_id, occurrence_id, timestamp),
+                    )
+            connection.commit()
+            instructions = 0
+
+            def progress() -> int:
+                nonlocal instructions
+                instructions += 100
+                return 0
+
+            connection.set_progress_handler(progress, 100)
+            try:
+                apply_migrations(connection)
+            finally:
+                connection.set_progress_handler(None, 0)
+            assert (
+                connection.execute("SELECT COUNT(*) FROM scan_severity_assessments").fetchone()[0]
+                == scan_count * findings_per_scan
+            )
+            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+            return instructions
+
+    small, large = instruction_count(20), instruction_count(200)
+    # Ten times the selected work must not become a quadratic scan of the assessment cache.
+    assert large < small * 20, (small, large)
+
+
 def test_workbench_backfills_repository_targets_only_during_migration() -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     apply_migrations = namespace["apply_migrations"]
@@ -484,162 +1271,282 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
     backfill.assert_called_once_with(connection)
 
 
-def test_scan_model_migration_preserves_existing_scans() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 25
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+@pytest.mark.cross_platform
+def test_registration_retains_the_widest_observed_checkout(tmp_path: Path) -> None:
+    connection, migrate = create_historical_database(70)
+    with closing(connection):
+        migrate(connection)
+        target = tmp_path / "checkout" / "nested" / "target"
+        target.mkdir(parents=True)
+        register = migrate.__globals__["ensure_security_target"]
+
+        def registered_root() -> str | None:
+            target_id = register(connection, str(target))
+            return connection.execute(
+                "SELECT git_checkout_root FROM security_targets WHERE id = ?", (target_id,)
+            ).fetchone()[0]
+
+        assert registered_root() == str(target)
+        subprocess.run(["git", "init", "-q", str(target.parent)], check=True)
+        assert registered_root() == str(target.parent)
+        outer = target.parents[1]
+        subprocess.run(["git", "init", "-q", str(outer)], check=True)
+        assert registered_root() == str(outer)
+        (outer / ".git").rename(tmp_path / "retired-git-dir")
+        assert registered_root() == str(outer)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("legacy_registration", ["target", "workspace"])
+def test_checkout_root_is_not_inferred_from_legacy_paths(
+    tmp_path: Path, legacy_registration: str
+) -> None:
+    target = tmp_path / "nested" / "target"
+    initialize_git_repository(target.parent)
+    target.mkdir()
+    connection, migrate = create_historical_database(70)
+    with closing(connection):
+        if legacy_registration == "target":
+            connection.execute(
+                "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) "
+                "VALUES ('old', ?, 'Old target', 'created', 'updated')",
+                (str(target),),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO workspaces (id, target_path, created_at, updated_at) "
+                "VALUES ('old', ?, 'created', 'updated')",
+                (str(target),),
+            )
+        migrate(connection)
+        for _ in range(2):
+            assert (
+                connection.execute("SELECT git_checkout_root FROM security_targets").fetchone()[0]
+                is None
+            )
+            migrate.__globals__["ensure_security_target"](connection, str(target))
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("binding", ["bound", "unbound", "dangling"])
+def test_unvalidated_target_migration_preserves_legacy_workspace_paths(
+    tmp_path: Path, binding: str
+) -> None:
+    connection, apply_migrations = create_historical_database(69)
+    with closing(connection):
+        target_path = str(tmp_path / "unavailable")
+        target_id = None if binding == "unbound" else "legacy-target"
+        if binding == "bound":
+            connection.execute(
+                "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+                "VALUES (?, ?, 'Legacy target', 'created', 'updated')",
+                (target_id, target_path),
+            )
+        connection.execute(
+            "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+            "VALUES ('legacy-workspace', ?, ?, 'created', 'updated')",
+            (target_id, target_path),
+        )
+        before = dict(connection.execute("SELECT * FROM workspaces").fetchone())
+        for _ in range(2):
+            apply_migrations(connection)
+            after = dict(connection.execute("SELECT * FROM workspaces").fetchone())
+            assert after == {
+                **before,
+                "target_id": after["target_id"],
+                "target_path_unvalidated": 0,
+                "rejected_checkout_roots_json": None,
+            }
+            assert after["target_id"] is not None
+            if binding == "bound":
+                assert after["target_id"] == target_id
+            assert (
+                connection.execute(
+                    "SELECT current_path FROM security_targets WHERE id = ?", (after["target_id"],)
+                ).fetchone()[0]
+                == target_path
+            )
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
+    connection, apply_migrations = create_historical_database(25)
     timestamp = "2026-07-01T00:00:00Z"
-    connection.execute(
-        "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
-        ("legacy-workspace", timestamp, timestamp),
-    )
-    connection.execute(
-        """
-        INSERT INTO scans (
-            id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-            status, phase, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "legacy-scan",
-            "legacy-workspace",
-            "/legacy/target",
-            "legacy-revision",
-            ".",
-            "standard",
-            "/legacy/scan",
-            "running",
-            "discovery",
-            timestamp,
-            timestamp,
-            timestamp,
-        ),
-    )
+    insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+    status = "complete" if complete else "running"
+    finished_at = "2026-07-01T01:00:00Z" if complete else None
+    insert_legacy_scan(connection, timestamp, status=status, completed_at=finished_at)
     connection.commit()
 
     apply_migrations(connection)
 
-    scan = connection.execute(
-        "SELECT status, model, reasoning_effort, completion_warnings_json FROM scans WHERE id = ?",
-        ("legacy-scan",),
-    ).fetchone()
-    assert scan["status"] == "running"
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", ("legacy-scan",)).fetchone()
+    assert scan["status"] == status
     assert scan["model"] is None
     assert scan["reasoning_effort"] is None
     assert scan["completion_warnings_json"] == "[]"
+    assert scan["launch_surface"] is None
+    assert scan["launch_package_version"] is None
+    assert scan["launch_plugin_version"] is None
+    assert scan["launch_kind"] is None
+    (snapshot,) = connection.execute(
+        "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?", ("legacy-scan",)
+    ).fetchone()
+    assert json.loads(snapshot) == {
+        "scanId": "legacy-scan",
+        "mode": "standard",
+        "startedAt": timestamp,
+        "status": "completed" if complete else "running",
+        "finishedAt": finished_at,
+        "hasReportableFindings": None,
+        "surface": None,
+        "packageVersion": None,
+        "pluginVersion": None,
+        "mock": None,
+    }
 
 
-def test_deep_discovery_error_migration_backfills_each_existing_threshold() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 27
+@pytest.mark.parametrize("preview_version", [48, 50, 63])
+def test_log_boundary_preview_preserves_saved_boundary_and_repairs_history(preview_version):
+    name = "persist scan log completion boundaries"
+    connection, apply_migrations = create_historical_database(
+        preview_version,
+        ((preview_version, name, "ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"),),
     )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    insert_historical_row(connection, "workspaces", "created", id="workspace")
+    insert_legacy_scan(
+        connection, "created", id="preview", workspace_id="workspace", log_completed_at="boundary"
+    )
 
-    timestamp = "2026-07-01T00:00:00Z"
-    for index, stop_after_no_new in enumerate((2, 7), start=1):
-        workspace_id = f"legacy-deep-workspace-{index}"
-        scan_id = f"legacy-deep-scan-{index}"
-        connection.execute(
-            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
-            (workspace_id, timestamp, timestamp),
+    apply_migrations(connection)
+    apply_migrations(connection)
+
+    assert (
+        connection.execute("SELECT log_completed_at FROM scans WHERE id = 'preview'").fetchone()[0]
+        == "boundary"
+    )
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (63,64) ORDER BY version"
         )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_path, target_revision, scope, mode,
-                scan_dir, status, phase, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, '.', 'deep', ?, 'running', 'discovery', ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                f"/legacy/target-{index}",
-                "legacy-revision",
-                f"/legacy/scan-{index}",
-                timestamp,
-                timestamp,
-                timestamp,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO deep_scan_runs (
-                scan_id, schema_version, workflow_version, status, phase,
-                workers, subagents, stop_after_no_new, max_discovery_runs,
-                created_at, updated_at
-            ) VALUES (?, 1, 'deep-scan-mcp/v1', 'running', 'discovery',
-                2, 0, ?, 10, ?, ?)
-            """,
-            (scan_id, stop_after_no_new, timestamp, timestamp),
+    ] == [(63, "retain unverified Deep Scan worker attempts"), (64, name)]
+    assert "worker_usage_gap" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
+
+
+def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
+    connection, apply_migrations = create_historical_database(64)
+    insert_historical_row(connection, "workspaces", "created", id="legacy-workspace")
+    for case in ("running", "complete", "failed", "canceled"):
+        insert_legacy_scan(
+            connection,
+            "later-edit",
+            id=case,
+            scan_dir=f"/legacy/{case}",
+            status="failed" if case == "canceled" else case,
+            completed_at=None if case == "running" else "artifact-time",
+            canceled_at="cancel-time" if case == "canceled" else None,
         )
     connection.commit()
+    before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
 
     apply_migrations(connection)
 
-    rows = connection.execute(
-        """
-        SELECT stop_after_no_new, stop_after_consecutive_errors, consecutive_errors
-        FROM deep_scan_runs
-        ORDER BY scan_id
-        """
-    ).fetchall()
-    assert [tuple(row) for row in rows] == [(2, 2, 0), (7, 7, 0)]
+    after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+    (target_id,) = connection.execute(
+        "SELECT id FROM security_targets WHERE current_path = ?", ("/legacy/target",)
+    ).fetchone()
+    assert after == [
+        {
+            **row,
+            "target_id": target_id,
+            "log_completed_at": None,
+            "windows_resume_output_identity": None,
+            "windows_resume_target_identity": None,
+            "repository_generation": None,
+            "completion_sequence": 1 if row["status"] == "complete" else None,
+        }
+        for row in before
+    ]
+
+
+@pytest.mark.parametrize(
+    ("recipe", "kind", "mode", "is_mock", "plugin_version", "registered_version"),
+    (
+        ('{"mock":true,"pluginVersion":"0.4.0"}', "mock", "standard", True, "0.4.0", None),
+        ('{"import":{},"pluginVersion":"0.5.0"}', "import", "import", False, "0.5.0", None),
+        ('{"mode":"standard","pluginVersion":"0.6.0"}', None, "standard", None, "0.6.0", None),
+        ('{"pluginVersion":"0.6.0"}', None, "standard", None, "0.7.0", "0.7.0"),
+        ('{"pluginVersion":"  "}', None, "standard", None, None, None),
+        ('{"pluginVersion":42}', None, "standard", None, None, None),
+        ('{"mode":"standard"}', None, "standard", None, None, None),
+        ('{"pluginVersion":', None, "standard", None, None, None),
+    ),
+)
+@pytest.mark.parametrize(
+    "write_after_upgrade", [False, True], ids=["before-upgrade", "after-upgrade"]
+)
+def test_scan_lifecycle_migration_recognizes_saved_recipes(
+    recipe: str,
+    kind: str | None,
+    mode: str,
+    is_mock: bool | None,
+    plugin_version: str | None,
+    registered_version: str | None,
+    write_after_upgrade: bool,
+) -> None:
+    connection, apply_migrations = create_historical_database(65 if registered_version else 64)
+    if write_after_upgrade:
+        apply_migrations(connection)
+
+    timestamp = "2026-07-01T00:00:00Z"
+    with connection:
+        insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+        attribution = {"launch_plugin_version": registered_version} if registered_version else {}
+        insert_legacy_scan(connection, timestamp, **attribution)
+        connection.execute("UPDATE scans SET recipe_json = ? WHERE id = ?", (recipe, "legacy-scan"))
+
+    if not write_after_upgrade:
+        apply_migrations(connection)
+
+    stored_kind, snapshot = connection.execute(
+        "SELECT launch_kind, snapshot FROM scans JOIN scan_lifecycles ON scan_id = id"
+    ).fetchone()
+    assert stored_kind == kind
+    lifecycle = json.loads(snapshot)
+    assert lifecycle["mode"] == mode
+    assert lifecycle["mock"] is is_mock
+    assert lifecycle["surface"] is None
+    assert lifecycle["packageVersion"] is None
+    assert lifecycle["pluginVersion"] == plugin_version
 
 
 @pytest.mark.parametrize(
     ("legacy_name", "has_owner_columns"),
     (
+        (None, False),
         ("durable deep scan coordinator ownership", True),
         ("repair deep scan orchestration state", False),
     ),
 )
-def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
-    legacy_name: str, has_owner_columns: bool
+def test_deep_scan_failure_counter_migration_backfills_existing_thresholds(
+    legacy_name: str | None, has_owner_columns: bool
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 27
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    connection, apply_migrations = create_historical_database(27)
     timestamp = "2026-07-01T00:00:00Z"
     for scan_id, stop_after_no_new in (("legacy-scan-a", 2), ("legacy-scan-b", 7)):
         workspace_id = f"workspace-{scan_id}"
-        connection.execute(
-            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
-            (workspace_id, timestamp, timestamp),
-        )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-                status, phase, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, 'legacy-revision', '.', 'deep', ?,
-                'running', 'discovery', ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                f"/legacy/{scan_id}",
-                f"/legacy/scans/{scan_id}",
-                timestamp,
-                timestamp,
-                timestamp,
-            ),
+        insert_historical_row(connection, "workspaces", timestamp, id=workspace_id)
+        insert_legacy_scan(
+            connection,
+            timestamp,
+            id=scan_id,
+            workspace_id=workspace_id,
+            target_path=f"/legacy/{scan_id}",
+            mode="deep",
+            scan_dir=f"/legacy/scans/{scan_id}",
         )
         connection.execute(
             """
@@ -653,10 +1560,8 @@ def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
     if has_owner_columns:
         connection.execute("ALTER TABLE deep_scan_runs ADD COLUMN coordinator_owner_id TEXT")
         connection.execute("ALTER TABLE deep_scan_runs ADD COLUMN coordinator_heartbeat_at TEXT")
-    connection.execute(
-        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (27, ?, ?)",
-        (legacy_name, timestamp),
-    )
+    if legacy_name is not None:
+        record_migration(connection, 27, legacy_name, timestamp)
     connection.commit()
     apply_migrations(connection)
     assert [
@@ -679,11 +1584,8 @@ def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
             "FROM deep_scan_runs ORDER BY scan_id"
         )
     ] == [(9, 3), (9, 3)]
-    assert (
-        connection.execute("SELECT name FROM schema_migrations WHERE version = 27").fetchone()[
-            "name"
-        ]
-        == legacy_name
+    assert migration_name_row(connection, 27)["name"] == (
+        legacy_name or "persist deep scan consecutive discovery failures"
     )
     if has_owner_columns:
         assert {"coordinator_owner_id", "coordinator_heartbeat_at"} <= {
@@ -691,35 +1593,16 @@ def test_workbench_repairs_recorded_deep_scan_failure_counter_migration(
         }
 
 
+@pytest.mark.cross_platform
 @pytest.mark.parametrize("migration_recorded", (False, True))
 def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
     migration_recorded: bool,
 ) -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 28
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    connection, apply_migrations = create_historical_database(28)
 
     timestamp = "2026-07-01T00:00:00Z"
-    connection.execute(
-        "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
-        ("legacy-workspace", timestamp, timestamp),
-    )
-    connection.execute(
-        """
-        INSERT INTO scans (
-            id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-            status, phase, started_at, created_at, updated_at
-        ) VALUES (?, ?, '/legacy/target', 'legacy-revision', '.', 'deep',
-            '/legacy/scan', 'running', 'discovery', ?, ?, ?)
-        """,
-        ("legacy-scan", "legacy-workspace", timestamp, timestamp, timestamp),
-    )
+    insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+    insert_legacy_scan(connection, timestamp, mode="deep")
     connection.execute(
         """
         INSERT INTO deep_scan_runs (
@@ -730,10 +1613,7 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
         ("legacy-scan", timestamp, timestamp),
     )
     if migration_recorded:
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (28, ?, ?)",
-            ("persist deep scan discovery time limit", timestamp),
-        )
+        record_migration(connection, 28, "persist deep scan discovery time limit", timestamp)
     connection.commit()
 
     apply_migrations(connection)
@@ -745,22 +1625,30 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
     apply_migrations(connection)
 
     assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone()[0] == 2.5
-    assert (
-        connection.execute("SELECT name FROM schema_migrations WHERE version = 28").fetchone()[0]
-        == "persist deep scan discovery time limit"
-    )
+    assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
+
+
+@pytest.mark.cross_platform
+def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
+    db, migrate = create_historical_database(63)
+    with closing(db):
+        timestamp = "2026-01-01T00:00:00Z"
+        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
+        record_migration(db, 63, "retain native investigation time allowances", timestamp)
+        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
+        migrate(db)
+        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
+        receipt = db.execute(query).fetchone()
+        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
+        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
+        migrate(db)
+        assert db.execute(query).fetchone() == receipt
+        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    historical_migrations = tuple(
-        migration for migration in namespace["MIGRATIONS"] if migration[0] < 29
-    )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": historical_migrations}):
-        apply_migrations(connection)
+    connection, apply_migrations = create_historical_database(29)
 
     retained_digest_applied_at = "2026-08-20T10:00:00Z"
     publication_error_applied_at = "2026-08-21T11:00:00Z"
@@ -792,7 +1680,7 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
     ]
     assert (
         connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_issue_receipts'"
         ).fetchone()
         is not None
     )
@@ -800,13 +1688,11 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
         row[0]
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' "
-            "AND tbl_name = 'finding_publications'"
+            "AND tbl_name = 'finding_issue_receipts'"
         )
     } >= {
-        "finding_publications_by_scan",
-        "finding_publications_by_finding",
-        "finding_publications_team_only_occurrence",
-        "finding_publications_team_only_external_issue",
+        "finding_issue_receipts_by_finding",
+        "finding_issue_receipts_by_destination_issue",
     }
     assert [
         row["name"]
@@ -820,54 +1706,78 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
     ] == ["publication_error_message"]
 
 
+def test_workbench_indexes_issue_ownership_without_changing_existing_receipts() -> None:
+    connection, apply_migrations = create_historical_database(49)
+    with closing(connection):
+        timestamp = "2026-01-01T00:00:00Z"
+        connection.executemany(
+            "INSERT INTO finding_issue_receipts (scan_id, finding_id, occurrence_id, "
+            "destination_key, external_id, external_url, operation, readback_json, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    f"scan-{index}",
+                    f"finding-{index}",
+                    f"occurrence-{index}",
+                    f"destination-{index % 2}",
+                    f"ISSUE-{index}",
+                    f"https://issues.example.test/browse/ISSUE-{index}",
+                    "create",
+                    '{"status":"verified"}',
+                    timestamp,
+                    timestamp,
+                )
+                for index in range(256)
+            ],
+        )
+        connection.commit()
+        receipts = connection.execute("SELECT * FROM finding_issue_receipts ORDER BY id").fetchall()
+        history = connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+
+        apply_migrations(connection)
+        apply_migrations(connection)
+
+        assert (
+            connection.execute("SELECT * FROM finding_issue_receipts ORDER BY id").fetchall()
+            == receipts
+        )
+        assert (
+            connection.execute(
+                "SELECT * FROM schema_migrations WHERE version < 49 ORDER BY version"
+            ).fetchall()
+            == history
+        )
+        query = (
+            "SELECT 1 FROM finding_issue_receipts WHERE destination_key = ? "
+            "AND external_id = ? AND finding_id != ? LIMIT 1"
+        )
+        parameters = ("destination-1", "ISSUE-129", "another-finding")
+        plan = connection.execute("EXPLAIN QUERY PLAN " + query, parameters).fetchall()
+        assert any(
+            row[3].startswith("SEARCH ")
+            and "COVERING INDEX finding_issue_receipts_by_destination_issue" in row[3]
+            for row in plan
+        ), [tuple(row) for row in plan]
+        assert connection.execute(query, parameters).fetchone()[0] == 1
+        assert (
+            connection.execute(query, ("destination-1", "ISSUE-129", "finding-129")).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(query, ("destination-0", "ISSUE-129", "another-finding")).fetchone()
+            is None
+        )
+
+
 def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT version, name FROM schema_migrations").fetchall() == [
-            (1, "initial workbench schema"),
-            (2, "persist capability preflight summaries"),
-            (3, "finding management schema"),
-            (4, "scan handoff delivery claims"),
-            (5, "finding remediation action claims"),
-            (6, "thread-scoped workspaces"),
-            (7, "remediation host delivery state"),
-            (8, "sealed manifest digests"),
-            (9, "scan target filesystem identity"),
-            (10, "scan cancellation state"),
-            (11, "deep scan orchestration state"),
-            (12, "scan continuation threads"),
-            (13, "scan scope file counts"),
-            (14, "imported triage results"),
-            (15, "append-only finding decisions"),
-            (16, "stable repository targets"),
-            (17, "scan target summaries"),
-            (18, "clear legacy delivered handoff claims"),
-            (19, "persist setup workspace preference"),
-            (20, "phase-specific scan progress"),
-            (21, "current scan preflight state"),
-            (22, "replayable scan launch recipes"),
-            (23, "semantic scan comparison matches"),
-            (24, "persist scan cost estimates"),
-            (25, "persist scan model settings"),
-            (26, "persist scan completion warnings"),
-            (27, "persist deep scan consecutive discovery failures"),
-            (28, "persist deep scan discovery time limit"),
-            (29, "persist finding publication associations"),
-            (30, "preserve team-only finding publication associations"),
-            (31, "freeze stopped scan source digests"),
-            (32, "separate deep scan publication failures"),
-            (33, "store complete findings and embeddings without a scan"),
-            (34, "associate findings with repositories"),
-            (35, "persist finding dedupe groups"),
-            (36, "persist local findings workflows"),
-            (37, "checkpoint validated dedupe reviews"),
-            (38, "store findings workflow metadata in columns"),
-            (39, "store dedupe checkpoint bindings in columns"),
-            (40, "index finding identity and comparison history"),
-            (41, "checkpoint finding severity assessments"),
-        ]
+        assert (
+            connection.execute("SELECT version, name FROM schema_migrations").fetchall()
+            == EXPECTED_MIGRATIONS
+        )
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "diff_target_kind",
             "diff_base_revision",
@@ -876,6 +1786,7 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             "diff_resolution_id",
             "capability_preflight_json",
             "thread_id",
+            "target_path_unvalidated",
         }
 
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
@@ -969,7 +1880,9 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (41,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            EXPECTED_MIGRATIONS[-1][0],
+        )
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",
@@ -1004,17 +1917,10 @@ def test_workbench_repairs_recorded_deep_scan_migration(
     drop_deep_scan_tables: bool,
     attach_continuation: bool,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace = create_saved_workspace(state_dir, target, thread_id="thread-deep-scan", mode="deep")
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        str(workspace["id"]),
-        "--scan-root",
-        str(tmp_path / "scans"),
+    started = start_scan_command(
+        state_dir, str(workspace["id"]), "--scan-root", str(tmp_path / "scans")
     )
     scan_id = str(started["results"]["scanId"])
     database = state_dir / "workbench.sqlite3"
@@ -1043,16 +1949,12 @@ def test_workbench_repairs_recorded_deep_scan_migration(
         assert connection.execute(
             "SELECT deep_scan_owner_thread_id, status FROM scans WHERE id = ?", (scan_id,)
         ).fetchone() == (expected_owner, "running")
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 11"
-        ).fetchone() == ("deep scan orchestration state",)
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 27"
-        ).fetchone() == ("persist deep scan consecutive discovery failures",)
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 28"
-        ).fetchone() == ("persist deep scan discovery time limit",)
-        assert "max_time_hours" in {
+        assert migration_name_row(connection, 11) == ("deep scan orchestration state",)
+        assert migration_name_row(connection, 27) == (
+            "persist deep scan consecutive discovery failures",
+        )
+        assert migration_name_row(connection, 28) == ("persist deep scan discovery time limit",)
+        assert {"max_time_hours", "terminal_reviewed_surface_count"} <= {
             row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
         }
         assert {
@@ -1082,8 +1984,7 @@ def test_workbench_repairs_pre_release_scan_continuation_migration(tmp_path: Pat
     automation_id = str(uuid.uuid4())
     thread_id = "thread-deep-scan"
     timestamp = "2026-06-24T18:57:06Z"
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     legacy_migrations = (
         (
             11,
@@ -1151,47 +2052,29 @@ def test_workbench_repairs_pre_release_scan_continuation_migration(tmp_path: Pat
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-            """
+        create_migration_history(connection)
+        apply_historical_migrations(connection, (*migrations[:10], *legacy_migrations), timestamp)
+        insert_historical_row(
+            connection,
+            "workspaces",
+            timestamp,
+            id=workspace_id,
+            target_path=str(target),
+            target_title="Legacy target",
+            default_mode="deep",
+            submitted=1,
+            thread_id=thread_id,
         )
-        for version, name, sql in (*migrations[:10], *legacy_migrations):
-            for statement in namespace["sql_statements"](sql):
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, timestamp),
-            )
-        connection.execute(
-            """
-            INSERT INTO workspaces (
-                id, target_path, target_title, default_mode, submitted, thread_id,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, 'deep', 1, ?, ?, ?)
-            """,
-            (workspace_id, str(target), "Legacy target", thread_id, timestamp, timestamp),
-        )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-                status, phase, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, 'unversioned', '.', 'deep', ?, 'running', 'preflight', ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                str(target),
-                str(tmp_path / "scans"),
-                timestamp,
-                timestamp,
-                timestamp,
-            ),
+        insert_legacy_scan(
+            connection,
+            timestamp,
+            id=scan_id,
+            workspace_id=workspace_id,
+            target_path=str(target),
+            target_revision="unversioned",
+            mode="deep",
+            scan_dir=str(tmp_path / "scans"),
+            phase="preflight",
         )
         connection.execute(
             "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
@@ -1231,10 +2114,7 @@ def test_workbench_repairs_pre_release_scan_continuation_migration(tmp_path: Pat
             (scan_id, timestamp, timestamp),
         )
 
-    first = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
-    second = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
-
-    assert first == second
+    first = read_migrated_workspace_twice(state_dir, workspace_id)
     assert first["results"]["continuationThreadId"] is None
     with sqlite3.connect(database) as connection:
         assert connection.execute(
@@ -1275,31 +2155,36 @@ def test_workbench_repairs_pre_release_scan_continuation_migration(tmp_path: Pat
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def start_migration_scan(tmp_path: Path) -> tuple[Path, str, str, Path]:
+    state_dir, target = empty_target_paths(tmp_path)
+    workspace_id = str(create_saved_workspace(state_dir, target)["id"])
+    started = start_scan_command(state_dir, workspace_id)
+    return (
+        state_dir,
+        workspace_id,
+        str(started["results"]["scanId"]),
+        state_dir / "workbench.sqlite3",
+    )
+
+
+def read_migrated_workspace_twice(state_dir: Path, workspace_id: str) -> dict[str, object]:
+    first = workspace_command(state_dir, "get-workspace", workspace_id)
+    second = workspace_command(state_dir, "get-workspace", workspace_id)
+    assert first == second
+    return first
+
+
 def test_workbench_repairs_recorded_scan_scope_file_count_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    database = state_dir / "workbench.sqlite3"
+    state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
         connection.execute("ALTER TABLE scan_progress DROP COLUMN scope_file_count")
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 13",
-            ("linear scan phase enforcement",),
-        )
+        rename_migration(connection, 13, "linear scan phase enforcement")
 
-    first = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-    second = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-
-    assert first == second
+    first = read_migrated_workspace_twice(state_dir, workspace_id)
     assert first["results"]["progress"]["coverage"]["filesTotal"] is None
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 13"
-        ).fetchone() == ("linear scan phase enforcement",)
+        assert migration_name_row(connection, 13) == ("linear scan phase enforcement",)
         assert connection.execute(
             "SELECT scope_file_count FROM scan_progress WHERE scan_id = ?", (scan_id,)
         ).fetchone() == (None,)
@@ -1323,9 +2208,7 @@ def test_workbench_repairs_shadowed_capability_preflight_migration(
 
     with sqlite3.connect(database) as connection:
         connection.execute("ALTER TABLE workspaces DROP COLUMN capability_preflight_json")
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 2", (legacy_name,)
-        )
+        rename_migration(connection, 2, legacy_name)
         if owns_thread_schema:
             connection.execute("DELETE FROM schema_migrations WHERE version = 6")
 
@@ -1358,8 +2241,7 @@ def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path
     scan_id = str(uuid.uuid4())
     legacy_target_id = "target_legacy_remote_identity"
     timestamp = "2026-06-30T00:00:00Z"
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     legacy_migration = (
         11,
         "stable scan target identities",
@@ -1368,48 +2250,30 @@ def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-            """
+        create_migration_history(connection)
+        apply_historical_migrations(
+            connection,
+            (*migrations[:10], legacy_migration, *migrations[11:15]),
+            timestamp,
         )
-        for version, name, sql in (*migrations[:10], legacy_migration, *migrations[11:15]):
-            for statement in namespace["sql_statements"](sql):
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, timestamp),
-            )
-        connection.execute(
-            """
-            INSERT INTO workspaces (
-                id, target_path, target_title, default_mode, submitted, created_at, updated_at
-            ) VALUES (?, ?, 'Legacy target', 'standard', 1, ?, ?)
-            """,
-            (workspace_id, str(target), timestamp, timestamp),
+        insert_historical_row(
+            connection,
+            "workspaces",
+            timestamp,
+            id=workspace_id,
+            target_path=str(target),
+            target_title="Legacy target",
+            default_mode="standard",
+            submitted=1,
         )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_id, target_path, target_revision, scope, mode,
-                scan_dir, status, phase, started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'legacy-revision', '.', 'standard', ?, 'running',
-                'discovery', ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                legacy_target_id,
-                str(target),
-                str(tmp_path / "scans"),
-                timestamp,
-                timestamp,
-                timestamp,
-            ),
+        insert_legacy_scan(
+            connection,
+            timestamp,
+            id=scan_id,
+            workspace_id=workspace_id,
+            target_id=legacy_target_id,
+            target_path=str(target),
+            scan_dir=str(tmp_path / "scans"),
         )
         connection.execute(
             "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
@@ -1419,8 +2283,8 @@ def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path
             "UPDATE workspaces SET active_scan_id = ? WHERE id = ?", (scan_id, workspace_id)
         )
 
-    first = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
-    second = run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
+    first = workspace_command(state_dir, "get-workspace", workspace_id)
+    second = workspace_command(state_dir, "get-workspace", workspace_id)
     repositories = run_workbench(state_dir, "list-repositories")["repositories"]
 
     assert first == second
@@ -1460,13 +2324,7 @@ def test_workbench_upgrades_stable_scan_target_identity_migration(tmp_path: Path
 
 
 def test_workbench_applies_shadowed_delivered_claim_cleanup_once(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    database = state_dir / "workbench.sqlite3"
+    state_dir, _, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -1474,10 +2332,7 @@ def test_workbench_applies_shadowed_delivered_claim_cleanup_once(tmp_path: Path)
             "handoff_claim_token = ? WHERE id = ?",
             ("2026-06-30T00:00:00Z", "stale-claim", scan_id),
         )
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 18",
-            ("scan target summaries",),
-        )
+        rename_migration(connection, 18, "scan target summaries")
 
     run_workbench(state_dir, "database-info")
 
@@ -1485,9 +2340,7 @@ def test_workbench_applies_shadowed_delivered_claim_cleanup_once(tmp_path: Path)
         assert connection.execute(
             "SELECT handoff_claimed_at, handoff_claim_token FROM scans WHERE id = ?", (scan_id,)
         ).fetchone() == (None, None)
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 18"
-        ).fetchone() == ("clear legacy delivered handoff claims",)
+        assert migration_name_row(connection, 18) == ("clear legacy delivered handoff claims",)
         connection.execute(
             "UPDATE scans SET handoff_claimed_at = ?, handoff_claim_token = ? WHERE id = ?",
             ("2026-07-01T00:00:00Z", "current-claim", scan_id),
@@ -1499,6 +2352,84 @@ def test_workbench_applies_shadowed_delivered_claim_cleanup_once(tmp_path: Path)
         assert connection.execute(
             "SELECT handoff_claimed_at, handoff_claim_token FROM scans WHERE id = ?", (scan_id,)
         ).fetchone() == ("2026-07-01T00:00:00Z", "current-claim")
+
+
+def test_legacy_delivered_scan_waits_for_its_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    state_dir, target = empty_target_paths(tmp_path)
+    workspace = create_saved_workspace(state_dir, target, mode="deep")
+    previous_id = start_delivered_scan(state_dir, workspace["id"])["scanId"]
+    fail_scan(state_dir, previous_id, "Earlier scan failed")
+    scan_id = start_delivered_scan(state_dir, workspace["id"])["scanId"]
+    begin = ("--thread-id", "fixture-thread", "--workflow-version", "fixture")
+
+    assert get_scan(state_dir, scan_id)["scan"]["scanId"] == scan_id
+    for command, args in (
+        ("get-scan", ("--context-claim-token", "")),
+        ("update-progress", ("--phase", "threat_model")),
+        ("begin-deep-scan", begin),
+    ):
+        result = scan_command(
+            state_dir, command, scan_id, "--model-thread-id", "fixture-thread", *args, check=False
+        )
+        assert result["returncode"] != 0
+        assert "awaiting its owning Codex thread" in result["stderr"]
+
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "fixture-thread")
+    other = scan_command(
+        state_dir,
+        "begin-deep-scan",
+        scan_id,
+        "--thread-id",
+        "other",
+        "--model-thread-id",
+        "other",
+        check=False,
+    )
+    assert "requires its owning Codex thread" in other["stderr"]
+    updated = update_progress(
+        state_dir, scan_id, "--model-thread-id", "fixture-thread", "--phase", "threat_model"
+    )
+    assert updated["scan"]["progress"]["phase"] == "threat_model"
+    begun = scan_command(
+        state_dir, "begin-deep-scan", scan_id, "--model-thread-id", "fixture-thread", *begin
+    )
+    assert begun["deepScan"]["scanId"] == scan_id
+    rejoined = run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--target-path",
+        str(target),
+        "--model-thread-id",
+        "fixture-thread",
+        *begin,
+    )
+    assert rejoined["startDisposition"] == "joined"
+    assert rejoined["deepScan"]["scanId"] == scan_id
+    read_context = ("--model-thread-id", "fixture-thread", "--context-claim-token", "")
+    assert get_scan(state_dir, scan_id, *read_context)["scan"]["scanId"] == scan_id
+    previous = get_scan(state_dir, previous_id, *read_context, check=False)
+    assert "awaiting its owning Codex thread" in previous["stderr"]
+
+    mark_deep_coordinator_succeeded(state_dir, scan_id, Path(begun["deepScan"]["scanDir"]))
+    replacement = run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--target-path",
+        str(target),
+        "--thread-id",
+        "other",
+        "--model-thread-id",
+        "other",
+        "--user-context",
+        begun["deepScan"]["userContext"],
+        "--workflow-version",
+        "fixture",
+    )
+    assert replacement["startDisposition"] == "created"
+    assert replacement["deepScan"]["scanId"] != scan_id
 
 
 @pytest.mark.parametrize(
@@ -1514,10 +2445,7 @@ def test_workbench_repairs_shadowed_setup_preferences_migration(
 
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TABLE setup_preferences")
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 19",
-            (legacy_name,),
-        )
+        rename_migration(connection, 19, legacy_name)
 
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
@@ -1526,9 +2454,7 @@ def test_workbench_repairs_shadowed_setup_preferences_migration(
             "skip_setup_ui",
             "updated_at",
         ]
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 19"
-        ).fetchone() == ("persist setup workspace preference",)
+        assert migration_name_row(connection, 19) == ("persist setup workspace preference",)
 
 
 @pytest.mark.parametrize(
@@ -1538,36 +2464,32 @@ def test_workbench_repairs_shadowed_setup_preferences_migration(
 def test_workbench_repairs_shadowed_phase_progress_migration(
     tmp_path: Path, legacy_name: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    database = state_dir / "workbench.sqlite3"
+    state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
         connection.execute("ALTER TABLE scan_progress DROP COLUMN phase_items_completed")
         connection.execute("ALTER TABLE scan_progress DROP COLUMN phase_items_total")
         connection.execute("ALTER TABLE scan_progress DROP COLUMN phase_progress_unit")
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 20",
-            (legacy_name,),
-        )
+        rename_migration(connection, 20, legacy_name)
 
-    first = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-    second = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-
-    assert first == second
+    read_migrated_workspace_twice(state_dir, workspace_id)
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT phase_items_total, phase_items_completed, phase_progress_unit "
             "FROM scan_progress WHERE scan_id = ?",
             (scan_id,),
         ).fetchone() == (0, 0, None)
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 20"
-        ).fetchone() == ("phase-specific scan progress",)
+        assert migration_name_row(connection, 20) == ("phase-specific scan progress",)
+        with pytest.raises(sqlite3.IntegrityError) as invalid_unit:
+            connection.execute(
+                "UPDATE scan_progress SET phase_progress_unit = 'invalid' WHERE scan_id = ?",
+                (scan_id,),
+            )
+        assert str(invalid_unit.value) == (
+            "CHECK constraint failed: phase_progress_unit IS NULL OR phase_progress_unit IN ("
+            "'checks', 'threat_surfaces', 'review_receipts', 'candidate_findings', "
+            "'validated_findings', 'report_artifacts')"
+        )
 
 
 @pytest.mark.parametrize(
@@ -1577,13 +2499,7 @@ def test_workbench_repairs_shadowed_phase_progress_migration(
 def test_workbench_repairs_shadowed_preflight_progress_migration(
     tmp_path: Path, legacy_name: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    saved = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
-    database = state_dir / "workbench.sqlite3"
+    state_dir, _, scan_id, database = start_migration_scan(tmp_path)
     with sqlite3.connect(database) as connection:
         connection.execute(
             """
@@ -1594,9 +2510,7 @@ def test_workbench_repairs_shadowed_preflight_progress_migration(
             """,
             (scan_id,),
         )
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 21", (legacy_name,)
-        )
+        rename_migration(connection, 21, legacy_name)
         connection.execute("ALTER TABLE scan_progress DROP COLUMN preflight_checks_completed")
         connection.execute("ALTER TABLE scan_progress DROP COLUMN preflight_checks_total")
         connection.execute("ALTER TABLE scan_progress DROP COLUMN preflight_issues_json")
@@ -1612,40 +2526,28 @@ def test_workbench_repairs_shadowed_preflight_progress_migration(
             """,
             (scan_id,),
         ).fetchone() == (0, 0, "[]")
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 21"
-        ).fetchone() == ("current scan preflight state",)
+        assert migration_name_row(connection, 21) == ("current scan preflight state",)
 
 
 def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    database = state_dir / "workbench.sqlite3"
+    state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
+        # Recreate the historical schema before removing its recipe column.
+        connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
+        connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 62")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 22",
-            ("dynamic scan execution profiles",),
-        )
+        rename_migration(connection, 22, "dynamic scan execution profiles")
 
-    first = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-    second = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-
-    assert first == second
+    read_migrated_workspace_twice(state_dir, workspace_id)
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT recipe_json, parent_scan_id FROM scans WHERE id = ?",
             (scan_id,),
         ).fetchone() == (None, None)
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 22"
-        ).fetchone() == ("replayable scan launch recipes",)
+        assert migration_name_row(connection, 22) == ("replayable scan launch recipes",)
         assert any(
             row[3] == "parent_scan_id" and row[2] == "scans" and row[6] == "SET NULL"
             for row in connection.execute("PRAGMA foreign_key_list(scans)")
@@ -1654,13 +2556,7 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
 
 
 def test_workbench_reconciles_released_completion_warning_version(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    database = state_dir / "workbench.sqlite3"
+    state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
         connection.execute(
@@ -1670,15 +2566,9 @@ def test_workbench_reconciles_released_completion_warning_version(tmp_path: Path
         connection.execute("DELETE FROM schema_migrations WHERE version = 26")
         connection.execute("ALTER TABLE scans DROP COLUMN reasoning_effort")
         connection.execute("ALTER TABLE scans DROP COLUMN model")
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 25",
-            ("persist scan completion warnings",),
-        )
+        rename_migration(connection, 25, "persist scan completion warnings")
 
-    first = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-    second = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-
-    assert first == second
+    read_migrated_workspace_twice(state_dir, workspace_id)
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT model, reasoning_effort, completion_warnings_json FROM scans WHERE id = ?",
@@ -1693,34 +2583,20 @@ def test_workbench_reconciles_released_completion_warning_version(tmp_path: Path
 
 
 def test_workbench_repairs_recorded_completion_warnings_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
-    workspace = create_saved_workspace(state_dir, target)
-    started = run_workbench(state_dir, "start-scan", "--workspace-id", str(workspace["id"]))
-    scan_id = str(started["results"]["scanId"])
-    database = state_dir / "workbench.sqlite3"
+    state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
     with sqlite3.connect(database) as connection:
         connection.execute("ALTER TABLE scans DROP COLUMN completion_warnings_json")
         connection.execute("ALTER TABLE scans ADD COLUMN attention_message TEXT")
-        connection.execute(
-            "UPDATE schema_migrations SET name = ? WHERE version = 26",
-            ("recoverable scan attention",),
-        )
+        rename_migration(connection, 26, "recoverable scan attention")
 
-    first = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-    second = run_workbench(state_dir, "get-workspace", "--workspace-id", str(workspace["id"]))
-
-    assert first == second
+    read_migrated_workspace_twice(state_dir, workspace_id)
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT completion_warnings_json, attention_message FROM scans WHERE id = ?",
             (scan_id,),
         ).fetchone() == ("[]", None)
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = 26"
-        ).fetchone() == ("recoverable scan attention",)
+        assert migration_name_row(connection, 26) == ("recoverable scan attention",)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -1748,122 +2624,27 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
     database.parent.mkdir(parents=True)
     target = tmp_path / "target"
     target.mkdir()
-    workspace_id = str(uuid.uuid4())
-    scan_id = str(uuid.uuid4())
     timestamp = "2026-07-01T00:00:00Z"
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
-    if dynamic:
-        legacy_model = "codex-next/security-pro"
-        legacy_effort = "adaptive_depth"
-        model_definition = """
-            TEXT CHECK (
-                execution_model IS NULL
-                OR (
-                    execution_model = trim(execution_model)
-                    AND length(execution_model) BETWEEN 1 AND 128
-                )
-            )
-        """
-        effort_definition = """
-            TEXT CHECK (
-                (reasoning_effort IS NULL
-                 OR (
-                    reasoning_effort = trim(reasoning_effort)
-                    AND length(reasoning_effort) BETWEEN 1 AND 64
-                 ))
-                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
-            )
-        """
-    else:
-        legacy_model = "gpt-5.5"
-        legacy_effort = "high"
-        model_definition = """
-            TEXT CHECK (
-                execution_model IS NULL
-                OR execution_model IN ('gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5')
-            )
-        """
-        effort_definition = """
-            TEXT CHECK (
-                (reasoning_effort IS NULL
-                 OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh'))
-                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
-            )
-        """
+    migrations = SCHEMA.MIGRATIONS
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-            """
-        )
+        create_migration_history(connection)
         current_migrations = (*migrations[: legacy_version - 1], *migrations[legacy_version:24])
-        for version, name, sql in current_migrations:
-            for statement in namespace["sql_statements"](sql):
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, timestamp),
-            )
-        for table in ("workspaces", "scans"):
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model {model_definition}")
-            connection.execute(
-                f"ALTER TABLE {table} ADD COLUMN reasoning_effort {effort_definition}"
-            )
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-            (legacy_version, legacy_name, timestamp),
-        )
+        apply_historical_migrations(connection, current_migrations, timestamp)
+        legacy_model, legacy_effort = add_legacy_profile_columns(connection, dynamic=dynamic)
+        record_migration(connection, legacy_version, legacy_name, timestamp)
         if preexisting_model:
             connection.execute("ALTER TABLE scans ADD COLUMN model TEXT")
-        connection.execute(
-            """
-            INSERT INTO workspaces (
-                id, target_path, default_mode, execution_model, reasoning_effort,
-                created_at, updated_at
-            ) VALUES (?, ?, 'standard', ?, ?, ?, ?)
-            """,
-            (
-                workspace_id,
-                str(target),
-                legacy_model,
-                legacy_effort,
-                timestamp,
-                timestamp,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-                status, phase, started_at, created_at, updated_at,
-                execution_model, reasoning_effort
-            ) VALUES (?, ?, ?, 'legacy-revision', '.', 'standard', ?, 'running',
-                'discovery', ?, ?, ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                str(target),
-                str(tmp_path / "legacy-scan"),
-                timestamp,
-                timestamp,
-                timestamp,
-                legacy_model,
-                legacy_effort,
-            ),
+        workspace_id, scan_id = insert_legacy_profile_scan(
+            connection, tmp_path, legacy_model, legacy_effort, timestamp
         )
         if preexisting_model:
             connection.execute("UPDATE scans SET model = 'current-model' WHERE id = ?", (scan_id,))
 
     run_workbench(state_dir, "database-info")
-    run_workbench(state_dir, "database-info")
+    # Creating, saving, starting and updating the new scan each reopen the migrated database.
+    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
     expected_migration_name = {
         11: "deep scan orchestration state",
@@ -1872,9 +2653,7 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
         25: "persist scan model settings",
     }.get(legacy_version, legacy_name)
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT name FROM schema_migrations WHERE version = ?", (legacy_version,)
-        ).fetchone() == (expected_migration_name,)
+        assert migration_name_row(connection, legacy_version) == (expected_migration_name,)
         assert connection.execute(
             """
             SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort
@@ -1893,110 +2672,132 @@ def test_workbench_reconciles_legacy_execution_profile_migrations(
         ).fetchone() == (legacy_model, legacy_effort)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
-    current_workspace = create_saved_workspace(state_dir, target)
-    current_scan = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(current_workspace["id"]),
-        "--scan-root",
-        str(tmp_path / "current-scans"),
-        "--model",
-        "gpt-5.6-sol",
-    )
-    current_scan_id = str(current_scan["results"]["scanId"])
-    run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        current_scan_id,
-        "--reasoning-effort",
-        "high",
+
+@pytest.mark.parametrize("installed_history", ["main-scan-names", "source-excerpt-scopes"])
+def test_workbench_preserves_both_installed_migration_42_histories(
+    tmp_path: Path, installed_history: str
+) -> None:
+    state_dir = tmp_path / "state"
+    database = state_dir / "workbench.sqlite3"
+    database.parent.mkdir()
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
+    timestamp = "2026-08-01T00:00:00Z"
+    installed = [
+        (42 if name == "persist authorized source excerpt scopes" else version, name, sql)
+        for version, name, sql in namespace["MIGRATIONS"]
+        if name
+        != (
+            "persist authorized source excerpt scopes"
+            if installed_history == "main-scan-names"
+            else "editable scan names"
+        )
+    ]
+    with sqlite3.connect(database) as connection:
+        create_migration_history(connection)
+        apply_historical_migrations(connection, installed, timestamp)
+        original = dict(connection.execute("SELECT name, applied_at FROM schema_migrations"))
+
+    run_workbench(state_dir, "database-info")
+    with sqlite3.connect(database) as connection:
+        first = connection.execute(
+            "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert [(version, name) for version, name, _ in first] == EXPECTED_MIGRATIONS
+        assert all(
+            {name: applied_at for _, name, applied_at in first}[name] == value
+            for name, value in original.items()
+        )
+        assert {"name", "source_scopes_json"} <= {
+            row[1] for row in connection.execute("PRAGMA table_info(scans)")
+        }
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    run_workbench(state_dir, "database-info")
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            == first
+        )
+
+
+@pytest.mark.parametrize("preview_version", [34, 40, 41, 42, 43, 44, 48])
+def test_workbench_upgrades_pre_release_source_scope_migration(
+    tmp_path: Path, preview_version: int
+) -> None:
+    state_dir = tmp_path / "state"
+    database = state_dir / "workbench.sqlite3"
+    database.parent.mkdir()
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
+    migrations = namespace["MIGRATIONS"]
+    source_scope = next(
+        migration
+        for migration in migrations
+        if migration[1] == "persist authorized source excerpt scopes"
     )
     with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE schema_migrations ("
+            "version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        for version, name, sql in migrations:
+            if version > (42 if preview_version == 43 else 32):
+                continue
+            for statement in SCHEMA.sql_statements(sql):
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+                (version, name, "2026-08-01T00:00:00Z"),
+            )
+        for statement in SCHEMA.sql_statements(source_scope[2]):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            (preview_version, source_scope[1], "2026-08-01T00:00:00Z"),
+        )
+
+    run_workbench(state_dir, "database-info")
+
+    with sqlite3.connect(database) as connection:
+        assert migration_name_row(connection, 34) == ("associate findings with repositories",)
         assert connection.execute(
-            """
-            SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort
-            FROM scans WHERE id = ?
-            """,
-            (current_scan_id,),
-        ).fetchone() == (None, None, "gpt-5.6-sol", "high")
+            "SELECT version, applied_at FROM schema_migrations WHERE name = ?",
+            (source_scope[1],),
+        ).fetchone() == (50, "2026-08-01T00:00:00Z")
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_repositories'"
+        ).fetchone() == ("finding_repositories",)
+        assert migration_name_row(connection, 43) == ("preserve severity assessments per scan",)
+        assert connection.execute("SELECT COUNT(*) FROM scan_severity_assessments").fetchone() == (
+            0,
+        )
+        assert "source_scopes_json" in {
+            row[1] for row in connection.execute("PRAGMA table_info(scans)")
+        }
 
 
 def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     database = state_dir / "workbench.sqlite3"
     database.parent.mkdir(parents=True)
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     assert [(version, name) for version, name, _ in migrations[:2]] == [
         (1, "initial workbench schema"),
         (2, "persist capability preflight summaries"),
     ]
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
-        connection.execute(
-            """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-            """
-        )
-        for version, name, sql in migrations[:2]:
-            for statement in namespace["sql_statements"](sql):
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, "2026-06-01T00:00:00Z"),
-            )
+        create_migration_history(connection)
+        apply_historical_migrations(connection, migrations[:2], "2026-06-01T00:00:00Z")
 
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT version, name FROM schema_migrations").fetchall() == [
-            (1, "initial workbench schema"),
-            (2, "persist capability preflight summaries"),
-            (3, "finding management schema"),
-            (4, "scan handoff delivery claims"),
-            (5, "finding remediation action claims"),
-            (6, "thread-scoped workspaces"),
-            (7, "remediation host delivery state"),
-            (8, "sealed manifest digests"),
-            (9, "scan target filesystem identity"),
-            (10, "scan cancellation state"),
-            (11, "deep scan orchestration state"),
-            (12, "scan continuation threads"),
-            (13, "scan scope file counts"),
-            (14, "imported triage results"),
-            (15, "append-only finding decisions"),
-            (16, "stable repository targets"),
-            (17, "scan target summaries"),
-            (18, "clear legacy delivered handoff claims"),
-            (19, "persist setup workspace preference"),
-            (20, "phase-specific scan progress"),
-            (21, "current scan preflight state"),
-            (22, "replayable scan launch recipes"),
-            (23, "semantic scan comparison matches"),
-            (24, "persist scan cost estimates"),
-            (25, "persist scan model settings"),
-            (26, "persist scan completion warnings"),
-            (27, "persist deep scan consecutive discovery failures"),
-            (28, "persist deep scan discovery time limit"),
-            (29, "persist finding publication associations"),
-            (30, "preserve team-only finding publication associations"),
-            (31, "freeze stopped scan source digests"),
-            (32, "separate deep scan publication failures"),
-            (33, "store complete findings and embeddings without a scan"),
-            (34, "associate findings with repositories"),
-            (35, "persist finding dedupe groups"),
-            (36, "persist local findings workflows"),
-            (37, "checkpoint validated dedupe reviews"),
-            (38, "store findings workflow metadata in columns"),
-            (39, "store dedupe checkpoint bindings in columns"),
-            (40, "index finding identity and comparison history"),
-            (41, "checkpoint finding severity assessments"),
-        ]
+        assert (
+            connection.execute("SELECT version, name FROM schema_migrations").fetchall()
+            == EXPECTED_MIGRATIONS
+        )
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
         }
@@ -2009,180 +2810,52 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
         }
 
 
-def test_workbench_upgrades_pre_release_phase_progress_migration(tmp_path: Path) -> None:
+@pytest.mark.parametrize("preflight", [False, True], ids=("phase", "preflight"))
+def test_workbench_upgrades_pre_release_phase_and_preflight_progress_migration(
+    tmp_path: Path, preflight: bool
+) -> None:
     state_dir = tmp_path / "state"
     database = state_dir / "workbench.sqlite3"
     database.parent.mkdir(parents=True)
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     phase_migration = next(
         migration for migration in migrations if migration[1] == "phase-specific scan progress"
     )
+    historical_migrations = [*migrations[:11], (12, *phase_migration[1:])]
+    expected_progress_columns = {
+        "scope_file_count",
+        "phase_items_completed",
+        "phase_items_total",
+        "phase_progress_unit",
+    }
+    if preflight:
+        preflight_migration = next(
+            migration for migration in migrations if migration[1] == "current scan preflight state"
+        )
+        historical_migrations.append((13, *preflight_migration[1:]))
+        expected_progress_columns.update(
+            ("preflight_checks_completed", "preflight_checks_total", "preflight_issues_json")
+        )
 
     with sqlite3.connect(database) as connection:
-        connection.execute(
-            """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-            """
-        )
-        for version, name, sql in migrations[:11]:
-            for statement in namespace["sql_statements"](sql):
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, "2026-07-01T00:00:00Z"),
-            )
-        for statement in namespace["sql_statements"](phase_migration[2]):
-            connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-            (12, phase_migration[1], "2026-07-01T00:00:00Z"),
-        )
+        create_migration_history(connection)
+        apply_historical_migrations(connection, historical_migrations, "2026-07-01T00:00:00Z")
 
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
-        ).fetchall() == [
-            (12, "scan continuation threads"),
-            (13, "scan scope file counts"),
-            (14, "imported triage results"),
-            (15, "append-only finding decisions"),
-            (16, "stable repository targets"),
-            (17, "scan target summaries"),
-            (18, "clear legacy delivered handoff claims"),
-            (19, "persist setup workspace preference"),
-            (20, "phase-specific scan progress"),
-            (21, "current scan preflight state"),
-            (22, "replayable scan launch recipes"),
-            (23, "semantic scan comparison matches"),
-            (24, "persist scan cost estimates"),
-            (25, "persist scan model settings"),
-            (26, "persist scan completion warnings"),
-            (27, "persist deep scan consecutive discovery failures"),
-            (28, "persist deep scan discovery time limit"),
-            (29, "persist finding publication associations"),
-            (30, "preserve team-only finding publication associations"),
-            (31, "freeze stopped scan source digests"),
-            (32, "separate deep scan publication failures"),
-            (33, "store complete findings and embeddings without a scan"),
-            (34, "associate findings with repositories"),
-            (35, "persist finding dedupe groups"),
-            (36, "persist local findings workflows"),
-            (37, "checkpoint validated dedupe reviews"),
-            (38, "store findings workflow metadata in columns"),
-            (39, "store dedupe checkpoint bindings in columns"),
-            (40, "index finding identity and comparison history"),
-            (41, "checkpoint finding severity assessments"),
-        ]
-        assert "continuation_thread_id" in {
-            row[1] for row in connection.execute("PRAGMA table_info(scans)")
-        }
-        assert {row[1] for row in connection.execute("PRAGMA table_info(scan_progress)")} >= {
-            "scope_file_count",
-            "phase_items_completed",
-            "phase_items_total",
-            "phase_progress_unit",
-        }
-
-
-def test_workbench_upgrades_pre_release_preflight_progress_migration(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    database = state_dir / "workbench.sqlite3"
-    database.parent.mkdir(parents=True)
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
-    phase_migration = next(
-        migration for migration in migrations if migration[1] == "phase-specific scan progress"
-    )
-    preflight_migration = next(
-        migration for migration in migrations if migration[1] == "current scan preflight state"
-    )
-
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-            """
-        )
-        for version, name, sql in migrations[:11]:
-            for statement in namespace["sql_statements"](sql):
-                connection.execute(statement)
+        assert (
             connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, "2026-07-01T00:00:00Z"),
-            )
-        for statement in namespace["sql_statements"](phase_migration[2]):
-            connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-            (12, phase_migration[1], "2026-07-01T00:00:00Z"),
+                "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
+            ).fetchall()
+            == EXPECTED_MIGRATIONS[11:]
         )
-        for statement in namespace["sql_statements"](preflight_migration[2]):
-            connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-            (13, preflight_migration[1], "2026-07-01T00:00:00Z"),
-        )
-
-    run_workbench(state_dir, "database-info")
-
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
-        ).fetchall() == [
-            (12, "scan continuation threads"),
-            (13, "scan scope file counts"),
-            (14, "imported triage results"),
-            (15, "append-only finding decisions"),
-            (16, "stable repository targets"),
-            (17, "scan target summaries"),
-            (18, "clear legacy delivered handoff claims"),
-            (19, "persist setup workspace preference"),
-            (20, "phase-specific scan progress"),
-            (21, "current scan preflight state"),
-            (22, "replayable scan launch recipes"),
-            (23, "semantic scan comparison matches"),
-            (24, "persist scan cost estimates"),
-            (25, "persist scan model settings"),
-            (26, "persist scan completion warnings"),
-            (27, "persist deep scan consecutive discovery failures"),
-            (28, "persist deep scan discovery time limit"),
-            (29, "persist finding publication associations"),
-            (30, "preserve team-only finding publication associations"),
-            (31, "freeze stopped scan source digests"),
-            (32, "separate deep scan publication failures"),
-            (33, "store complete findings and embeddings without a scan"),
-            (34, "associate findings with repositories"),
-            (35, "persist finding dedupe groups"),
-            (36, "persist local findings workflows"),
-            (37, "checkpoint validated dedupe reviews"),
-            (38, "store findings workflow metadata in columns"),
-            (39, "store dedupe checkpoint bindings in columns"),
-            (40, "index finding identity and comparison history"),
-            (41, "checkpoint finding severity assessments"),
-        ]
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
         }
-        assert {row[1] for row in connection.execute("PRAGMA table_info(scan_progress)")} >= {
-            "scope_file_count",
-            "phase_items_completed",
-            "phase_items_total",
-            "phase_progress_unit",
-            "preflight_checks_completed",
-            "preflight_checks_total",
-            "preflight_issues_json",
-        }
+        assert {row[1] for row in connection.execute("PRAGMA table_info(scan_progress)")} >= (
+            expected_progress_columns
+        )
 
 
 def test_workbench_normalizes_pre_release_migration_numbers(tmp_path: Path) -> None:
@@ -2197,10 +2870,7 @@ def test_workbench_normalizes_pre_release_migration_numbers(tmp_path: Path) -> N
         connection.execute("UPDATE schema_migrations SET version = 2 WHERE version = -3")
         connection.execute("UPDATE schema_migrations SET version = 3 WHERE version = -4")
         connection.execute("UPDATE schema_migrations SET version = 4 WHERE version = -5")
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-            (5, "scan target snapshot digests", "2026-06-01T00:00:00Z"),
-        )
+        record_migration(connection, 5, "scan target snapshot digests", "2026-06-01T00:00:00Z")
         connection.execute("ALTER TABLE workspaces DROP COLUMN capability_preflight_json")
 
     run_workbench(state_dir, "database-info")
@@ -2224,17 +2894,12 @@ def test_workbench_preserves_diff_target_summary_on_scan(tmp_path: Path) -> None
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
-    run_workbench(state_dir, "create-workspace", "--workspace-id", workspace_id)
-    run_workbench(
+    create_workspace(state_dir, workspace_id)
+    save_workspace(
         state_dir,
-        "save-workspace",
-        "--workspace-id",
         workspace_id,
-        "--target-path",
         str(target),
-        "--scope",
         ".",
-        "--mode",
         "diff",
         "--target-summary",
         "Authentication callback changes",
@@ -2244,66 +2909,36 @@ def test_workbench_preserves_diff_target_summary_on_scan(tmp_path: Path) -> None
         revision,
     )
 
-    started = run_workbench(
-        state_dir,
-        "start-scan",
-        "--workspace-id",
-        workspace_id,
-        "--scan-root",
-        str(tmp_path / "scans"),
-    )
+    started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))
     scan_id = started["results"]["scanId"]
 
     assert started["results"]["targetSummary"] == "Authentication callback changes"
     assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["targetSummary"]
-        == "Authentication callback changes"
+        get_scan(state_dir, scan_id)["scan"]["targetSummary"] == "Authentication callback changes"
     )
 
 
+@pytest.mark.cross_platform
 def test_workbench_upgrades_public_cli_completion_warning_migration() -> None:
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
-    apply_migrations = namespace["apply_migrations"]
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    public_migrations = (
-        *(migration for migration in namespace["MIGRATIONS"] if migration[0] < 25),
+    connection, apply_migrations = create_historical_database(
+        25,
         (
-            25,
-            "persist scan completion warnings",
-            ("ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';"),
+            (
+                25,
+                "persist scan completion warnings",
+                "ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';",
+            ),
         ),
     )
-    with mock.patch.dict(apply_migrations.__globals__, {"MIGRATIONS": public_migrations}):
-        apply_migrations(connection)
 
     timestamp = "2026-07-01T00:00:00Z"
-    connection.execute(
-        "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
-        ("legacy-workspace", timestamp, timestamp),
-    )
-    connection.execute(
-        """
-        INSERT INTO scans (
-            id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-            status, phase, started_at, created_at, updated_at, completion_warnings_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "legacy-scan",
-            "legacy-workspace",
-            "/legacy/target",
-            "legacy-revision",
-            ".",
-            "standard",
-            "/legacy/scan",
-            "complete",
-            "reporting",
-            timestamp,
-            timestamp,
-            timestamp,
-            '["existing warning"]',
-        ),
+    insert_historical_row(connection, "workspaces", timestamp, id="legacy-workspace")
+    insert_legacy_scan(
+        connection,
+        timestamp,
+        status="complete",
+        phase="reporting",
+        completion_warnings_json='["existing warning"]',
     )
     connection.commit()
 
@@ -2355,94 +2990,20 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
     database.parent.mkdir(parents=True)
     target = tmp_path / "target"
     target.mkdir()
-    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_schema")
-    migrations = namespace["MIGRATIONS"]
+    migrations = SCHEMA.MIGRATIONS
     timestamp = "2026-07-01T00:00:00Z"
-    workspace_id = str(uuid.uuid4())
-    scan_id = str(uuid.uuid4())
-    if has_dynamic_profile_migration:
-        model = "codex-next/security-pro"
-        reasoning_effort = "adaptive_depth"
-        model_definition = """
-            TEXT CHECK (
-                execution_model IS NULL
-                OR (
-                    execution_model = trim(execution_model)
-                    AND length(execution_model) BETWEEN 1 AND 128
-                )
-            )
-        """
-        reasoning_effort_definition = """
-            TEXT CHECK (
-                (reasoning_effort IS NULL
-                 OR (
-                    reasoning_effort = trim(reasoning_effort)
-                    AND length(reasoning_effort) BETWEEN 1 AND 64
-                 ))
-                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
-            )
-        """
-    else:
-        model = "gpt-5.5"
-        reasoning_effort = "high"
-        model_definition = """
-            TEXT CHECK (
-                execution_model IS NULL
-                OR execution_model IN ('gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5')
-            )
-        """
-        reasoning_effort_definition = """
-            TEXT CHECK (
-                (reasoning_effort IS NULL
-                 OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh'))
-                AND ((execution_model IS NULL) = (reasoning_effort IS NULL))
-            )
-        """
 
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
-        connection.execute(
-            """
-            CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-            """
+        create_migration_history(connection)
+        apply_historical_migrations(connection, migrations[:10], timestamp)
+        model, reasoning_effort = add_legacy_profile_columns(
+            connection, dynamic=has_dynamic_profile_migration
         )
-        for version, name, sql in migrations[:10]:
-            for statement in namespace["sql_statements"](sql):
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, timestamp),
-            )
-        for table in ("workspaces", "scans"):
-            connection.execute(
-                f"""
-                ALTER TABLE {table}
-                ADD COLUMN execution_model {model_definition}
-                """
-            )
-            connection.execute(
-                f"""
-                ALTER TABLE {table}
-                ADD COLUMN reasoning_effort {reasoning_effort_definition}
-                """
-            )
         if migration_history == "canonical-metadata":
-            for version, name, sql in migrations[10:24]:
-                for statement in namespace["sql_statements"](sql):
-                    connection.execute(statement)
-                connection.execute(
-                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                    (version, name, timestamp),
-                )
+            apply_historical_migrations(connection, migrations[10:24], timestamp)
             connection.execute("ALTER TABLE scans ADD COLUMN model TEXT")
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (25, "persist scan model settings", timestamp),
-            )
+            record_migration(connection, 25, "persist scan model settings", timestamp)
         else:
             legacy_migrations = [(11, "scan execution profiles", timestamp)]
             if has_dynamic_profile_migration:
@@ -2457,7 +3018,7 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
                     migration for migration in migrations if migration[1] == migration_name
                 )
                 assert version in (12, 20)
-                for statement in namespace["sql_statements"](sql):
+                for statement in SCHEMA.sql_statements(sql):
                     connection.execute(statement)
                 legacy_migrations.append((12, migration_name, timestamp))
             connection.executemany(
@@ -2470,55 +3031,14 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
             connection.execute(
                 "ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'"
             )
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (
-                    26 if migration_history == "canonical-metadata" else 25,
-                    "persist scan completion warnings",
-                    timestamp,
-                ),
+            record_migration(
+                connection,
+                26 if migration_history == "canonical-metadata" else 25,
+                "persist scan completion warnings",
+                timestamp,
             )
-        connection.execute(
-            """
-            INSERT INTO workspaces (
-                id, target_path, default_mode, execution_model, reasoning_effort,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                workspace_id,
-                str(target),
-                "standard",
-                model,
-                reasoning_effort,
-                timestamp,
-                timestamp,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO scans (
-                id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
-                status, phase, started_at, created_at, updated_at,
-                execution_model, reasoning_effort
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                scan_id,
-                workspace_id,
-                str(target),
-                "legacy-revision",
-                ".",
-                "standard",
-                str(tmp_path / "legacy-scan"),
-                "running",
-                "discovery",
-                timestamp,
-                timestamp,
-                timestamp,
-                model,
-                reasoning_effort,
-            ),
+        workspace_id, scan_id = insert_legacy_profile_scan(
+            connection, tmp_path, model, reasoning_effort, timestamp
         )
         if has_completion_warning:
             connection.execute(
@@ -2529,7 +3049,8 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
             connection.execute("UPDATE scans SET model = ? WHERE id = ?", ("gpt-current", scan_id))
 
     run_workbench(state_dir, "database-info")
-    run_workbench(state_dir, "database-info")
+    # Creating, saving, starting and updating the new scan each reopen the migrated database.
+    assert_new_scan_model_is_independent(state_dir, target, tmp_path / "current-scans")
 
     with sqlite3.connect(database) as connection:
         assert connection.execute(
@@ -2566,65 +3087,20 @@ def test_workbench_upgrades_legacy_execution_profile_migrations(
         ).fetchone() == (model, reasoning_effort)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
-    current_workspace = create_saved_workspace(state_dir, target)
-    current_scan = start_delivered_scan(
-        state_dir,
-        "--workspace-id",
-        str(current_workspace["id"]),
-        "--scan-root",
-        str(tmp_path / "current-scans"),
-        "--model",
-        "gpt-5.6-sol",
-    )
-    current_scan_id = str(current_scan["results"]["scanId"])
-    assert current_scan["results"]["reasoningEffort"] is None
-    run_workbench(
-        state_dir,
-        "update-progress",
-        "--scan-id",
-        current_scan_id,
-        "--reasoning-effort",
-        "high",
-    )
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            """
-            SELECT legacy_execution_model, legacy_reasoning_effort, model,
-                reasoning_effort
-            FROM scans
-            WHERE id = ?
-            """,
-            (current_scan_id,),
-        ).fetchone() == (None, None, "gpt-5.6-sol", "high")
-
 
 def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_history() -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     apply_migrations = namespace["apply_migrations"]
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
-    connection.execute(
-        """
-        CREATE TABLE schema_migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            applied_at TEXT NOT NULL
-        )
-        """
-    )
+    create_migration_history(connection)
     timestamp = "2026-07-01T00:00:00Z"
-    for version, name, sql in namespace["MIGRATIONS"][:10]:
-        for statement in namespace["sql_statements"](sql):
-            connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-            (version, name, timestamp),
-        )
+    apply_historical_migrations(connection, namespace["MIGRATIONS"][:10], timestamp)
     for table in ("workspaces", "scans"):
         connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model TEXT")
         connection.execute(f"ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT")
     continuation = next(migration for migration in namespace["MIGRATIONS"] if migration[0] == 12)
-    for statement in namespace["sql_statements"](continuation[2]):
+    for statement in SCHEMA.sql_statements(continuation[2]):
         connection.execute(statement)
     connection.executemany(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -2656,3 +3132,541 @@ def test_workbench_rejects_unknown_execution_profile_migration_without_mutating_
     scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
     assert {"execution_model", "reasoning_effort"}.issubset(scan_columns)
     assert "legacy_execution_model" not in scan_columns
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("profile_migration", "follow_up_migration", "supported"),
+    (
+        ("scan execution profiles", "scan continuation threads", True),
+        ("scan execution profiles", "phase-specific scan progress", True),
+        ("unknown execution profile migration", "scan continuation threads", False),
+    ),
+)
+def test_workbench_reconciles_profile_and_public_warning_histories(
+    tmp_path: Path, profile_migration: str, follow_up_migration: str, supported: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    database = state_dir / "workbench.sqlite3"
+    timestamp = "2026-07-30T00:00:00Z"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        apply_historical_migrations(connection, SCHEMA.MIGRATIONS[:10], timestamp)
+        for table in ("workspaces", "scans"):
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN execution_model TEXT")
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT")
+        follow_up = next(item for item in SCHEMA.MIGRATIONS if item[1] == follow_up_migration)
+        for statement in SCHEMA.sql_statements(follow_up[2]):
+            connection.execute(statement)
+        connection.executemany(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            ((11, profile_migration, timestamp), (12, follow_up_migration, timestamp)),
+        )
+        connection.execute(
+            "ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'"
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            (25, "persist scan completion warnings", timestamp),
+        )
+
+    upgrade = run_workbench(state_dir, "database-info", check=False)
+    assert upgrade["returncode"] == (0 if supported else 1)
+    if not supported:
+        assert "unsupported execution-profile migration history" in upgrade["stderr"]
+
+    with sqlite3.connect(database) as connection:
+        migrations = dict(
+            connection.execute(
+                "SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 20, 25, 26)"
+            )
+        )
+        assert migrations == (
+            {
+                11: "deep scan orchestration state",
+                12: "scan continuation threads",
+                20: "phase-specific scan progress",
+                25: "persist scan model settings",
+                26: "persist scan completion warnings",
+            }
+            if supported
+            else {
+                11: profile_migration,
+                12: follow_up_migration,
+                25: "persist scan completion warnings",
+            }
+        )
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        assert ("legacy_execution_model" in columns) is supported
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deep_scan_runs'"
+            ).fetchone()
+            is not None
+        ) is supported
+
+
+@pytest.mark.parametrize("installed", ["main", "repository-identities", "fresh"])
+def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        if installed != "fresh":
+            create_migration_history(connection)
+            historical = []
+            for version, name, sql in namespace["MIGRATIONS"]:
+                if installed == "main" and name == "persist repository identities":
+                    continue
+                if installed == "repository-identities" and name == "editable scan names":
+                    continue
+                historical.append(
+                    (42 if name == "persist repository identities" else version, name, sql)
+                )
+            apply_historical_migrations(connection, historical, "synthetic-original")
+        else:
+            namespace["apply_schema_migrations"](
+                connection, namespace["MIGRATIONS"], namespace["now"], lambda _: None
+            )
+        connection.execute(
+            "INSERT INTO workspaces(id,created_at,updated_at) "
+            "VALUES ('synthetic-workspace','synthetic-created','synthetic-updated')"
+        )
+        connection.execute(
+            "INSERT INTO scans(id,workspace_id,target_path,target_revision,scope,mode,scan_dir,"
+            "status,phase,started_at,completed_at,created_at,updated_at) VALUES "
+            "('synthetic-scan','synthetic-workspace','/synthetic/repository','synthetic-revision',"
+            "'.','standard','/synthetic/output','complete','reporting',"
+            "'2026-01-01T00:00:00Z','2026-01-01T00:01:00Z','synthetic-created','synthetic-updated')"
+        )
+        saved_scan = dict(connection.execute("SELECT * FROM scans").fetchone())
+        timestamps = {
+            row["name"]: row["applied_at"]
+            for row in connection.execute("SELECT * FROM schema_migrations")
+        }
+        for _ in range(2):
+            namespace["apply_schema_migrations"](
+                connection, namespace["MIGRATIONS"], namespace["now"], lambda _: None
+            )
+            scan = dict(connection.execute("SELECT * FROM scans").fetchone())
+            assert saved_scan.items() <= scan.items()
+            assert scan["name"] is None
+            assert scan["repository_generation"] is None
+            assert scan["completion_sequence"] == 1
+            migrations = {
+                row["name"]: (row["version"], row["applied_at"])
+                for row in connection.execute("SELECT * FROM schema_migrations")
+            }
+            assert migrations["editable scan names"][0] == 42
+            assert migrations["persist repository identities"][0] == 67
+            for name, timestamp in timestamps.items():
+                assert migrations[name][1] == timestamp
+
+
+@pytest.mark.parametrize("spelling", ["canonical", "dot", "trailing"])
+def test_correcting_aliased_workspace_setup_retains_target(tmp_path: Path, spelling: str) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    canonical = str(repository)
+    original = (
+        canonical + ({"canonical": "", "dot": os.sep + "." + os.sep, "trailing": os.sep}[spelling])
+    )
+    workspace = str(uuid.uuid4())
+    create_workspace(state, workspace, "--target-path", original, "--scope", "missing")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        before = connection.execute("SELECT id, current_path FROM security_targets").fetchall()
+        assert len(before) == 1
+        assert before[0][1] == original
+    save_workspace(state, workspace, canonical, ".", "standard")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT id, current_path FROM security_targets").fetchall() == before
+        )
+        assert connection.execute(
+            "SELECT target_id, target_path, submitted FROM workspaces WHERE id = ?", (workspace,)
+        ).fetchone() == (before[0][0], canonical, 1)
+    scan_id, _ = start_workspace_scan(state, workspace, tmp_path / "scans")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT target_id FROM scans WHERE id = ?", (scan_id,)).fetchone()[0]
+            == before[0][0]
+        )
+
+
+@pytest.mark.parametrize("before_version", [67, 68])
+@pytest.mark.parametrize("with_scan", [False, True])
+def test_identity_migrations_skip_unavailable_historical_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before_version: int, with_scan: bool
+) -> None:
+    git = Path(shutil.which("git") or "git").resolve()
+    historical = str(git.parent)
+    monkeypatch.setenv("CODEX_SECURITY_GIT", str(git))
+    connection, apply_migrations = create_historical_database(before_version)
+    timestamp = "2026-08-01T00:00:00Z"
+    target_id, workspace_id = "historical-target", str(uuid.uuid4())
+    connection.execute(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+        "VALUES (?, ?, 'Historical tools', ?, ?)",
+        (target_id, historical, timestamp, timestamp),
+    )
+    connection.execute(
+        "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (workspace_id, target_id, historical, timestamp, timestamp),
+    )
+    old_identity = "repository_sha256_" + "1" * 64 if before_version == 68 else None
+    if old_identity is not None:
+        connection.execute("UPDATE security_targets SET repository_identity = ?", (old_identity,))
+    if with_scan:
+        connection.execute(
+            "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, "
+            "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
+            "VALUES ('historical-scan', ?, ?, ?, 'unversioned', '.', 'standard', "
+            "'historical-output', 'complete', 'reporting', ?, ?, ?)",
+            (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
+        )
+    apply_migrations(connection)
+    assert (
+        connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        == EXPECTED_MIGRATIONS[-1][0]
+    )
+    assert tuple(
+        connection.execute(
+            "SELECT id, current_path, repository_identity FROM security_targets"
+        ).fetchone()
+    ) == (target_id, historical, old_identity)
+    assert tuple(
+        connection.execute(
+            "SELECT target_id, target_path FROM workspaces WHERE id = ?", (workspace_id,)
+        ).fetchone()
+    ) == (target_id, historical)
+    if with_scan:
+        assert tuple(
+            connection.execute("SELECT id, target_id, target_path FROM scans").fetchone()
+        ) == ("historical-scan", target_id, historical)
+    with pytest.raises(SystemExit, match="outside the protected repository"):
+        apply_migrations.__globals__["ensure_security_target"](connection, historical)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    with sqlite3.connect(state / "workbench.sqlite3") as saved:
+        connection.backup(saved)
+    connection.close()
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    workspace = create_saved_workspace(state, unrelated)
+    scan_id, _ = start_workspace_scan(state, str(workspace["id"]), tmp_path / "scans")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_path FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] == str(unrelated)
+
+
+def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    connection, apply_migrations = create_historical_database(68)
+    connection.executescript("""
+        CREATE TRIGGER competing_target BEFORE INSERT ON security_targets
+        WHEN NEW.id <> 'existing-target'
+        BEGIN
+            INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at)
+            VALUES ('existing-target', NEW.current_path, NEW.display_name, NEW.created_at, NEW.updated_at);
+            SELECT RAISE(IGNORE);
+        END;
+    """)
+    target = apply_migrations.__globals__["ensure_security_target"](connection, str(repository))
+    assert target == "existing-target"
+    assert [
+        tuple(row) for row in connection.execute("SELECT id, current_path FROM security_targets")
+    ] == [(target, str(repository))]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="The executable marker fixture is a POSIX script")
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize(
+    "executable_source",
+    [
+        "caller",
+        "historical",
+        "unavailable-historical",
+        "redirected-historical",
+        "redirected-destination",
+    ],
+)
+def test_identity_migration_excludes_all_history_and_caller_git(
+    tmp_path: Path, executable_source: str, configured: bool
+) -> None:
+    git = shutil.which("git")
+    assert git is not None
+    caller, saved, other = (tmp_path / name for name in ("caller", "saved", "other"))
+    for repository in (caller, saved, other):
+        initialize_git_repository(repository)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    connection, _ = create_historical_database(67)
+    timestamp = "2026-08-01T00:00:00Z"
+    destination = tmp_path / "destination"
+    if executable_source.startswith("redirected-"):
+        initialize_git_repository(destination)
+        (other / "subdir").symlink_to(destination, target_is_directory=True)
+    for index, repository in enumerate((saved, other)):
+        if index == 1 and executable_source.startswith("redirected-"):
+            repository = repository / "subdir"
+        if index == 1 and executable_source == "unavailable-historical":
+            (repository / "replaced-component").write_text("no longer a directory\n")
+            repository = repository / "replaced-component" / "old-target"
+        connection.execute(
+            "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+            "VALUES (?, ?, 'Saved repository', ?, ?)",
+            (f"saved-{index}", str(repository), timestamp, timestamp),
+        )
+    connection.commit()
+    with sqlite3.connect(state / "workbench.sqlite3") as database:
+        connection.backup(database)
+    connection.close()
+    executable_root = caller if executable_source == "caller" else other
+    if executable_source == "redirected-destination":
+        executable_root = destination
+    marker = tmp_path / "repository-git-ran"
+    executable = executable_root / "git"
+    executable.write_text(
+        '#!/bin/sh\nprintf invoked > "$MIGRATION_GIT_MARKER"\nexec "$MIGRATION_HOST_GIT" "$@"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
+    environment.update(
+        CODEX_SECURITY_STATE_DIR=str(state),
+        PATH=str(executable_root) + os.pathsep + os.environ.get("PATH", ""),
+        MIGRATION_GIT_MARKER=str(marker),
+        MIGRATION_HOST_GIT=git,
+    )
+    if configured:
+        environment["CODEX_SECURITY_GIT"] = git
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "list-scans"],
+        cwd=caller,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout)["scans"] == []
+    assert not marker.exists()
+    with sqlite3.connect(state / "workbench.sqlite3") as database:
+        identities = dict(database.execute("SELECT id, repository_identity FROM security_targets"))
+        assert (identities["saved-0"] is not None) is configured
+        assert (identities["saved-1"] is not None) is (
+            configured and executable_source != "unavailable-historical"
+        )
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    "completions,pending,expected",
+    [
+        pytest.param(
+            [("older", 2), ("newer", 3), ("last", 4)],
+            ["older"],
+            ["older", "newer", "last"],
+            id="earlier",
+        ),
+        pytest.param(
+            [("older", 2), ("newer", 3), ("last", 1)],
+            ["older"],
+            ["older", "newer", "last"],
+            id="earlier-with-reversed-recorded-clock",
+        ),
+        pytest.param(
+            [
+                ("first", 10),
+                ("middle", 20),
+                ("last", 30),
+                ("early", 5),
+                ("between", 25),
+                ("late", 40),
+            ],
+            ["early", "between", "late"],
+            ["early", "first", "middle", "between", "last", "late"],
+            id="before-between-after",
+        ),
+        pytest.param(
+            [("first", 20), ("middle", 10), ("last", 30), ("between", 25), ("late", 50)],
+            ["between", "late"],
+            ["first", "middle", "between", "last", "late"],
+            id="interleave-without-reordering-recorded-history",
+        ),
+        pytest.param(
+            [("first", 1), ("second", 2), ("latest", 3)],
+            ["latest"],
+            ["first", "second", "latest"],
+            id="later",
+        ),
+    ],
+)
+def test_identity_migration_merges_partially_sequenced_completion_history(
+    workbench_api, completions: list[tuple[str, int]], pending: list[str], expected: list[str]
+) -> None:
+    connection, apply_migrations = create_historical_database(68)
+    connection.execute(
+        "INSERT INTO workspaces(id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
+    )
+    for scan_id, minute in completions:
+        insert_legacy_scan(
+            connection,
+            "2026-08-01T00:01:00Z" if scan_id == "older" else "2026-08-01T00:00:00Z",
+            id=scan_id,
+            workspace_id="workspace",
+            scan_dir=f"/synthetic/output/{scan_id}",
+            status="complete",
+            completed_at=f"2026-08-01T00:{minute:02}:00Z",
+        )
+    connection.executemany(
+        "UPDATE scans SET completion_sequence = NULL WHERE id = ?",
+        [(scan_id,) for scan_id in pending],
+    )
+    for _ in range(2):
+        apply_migrations(connection)
+        rows = connection.execute("SELECT * FROM scans ORDER BY completion_sequence").fetchall()
+        assert [row["id"] for row in rows] == expected
+        assert (
+            max(rows, key=workbench_api["scan_history"]._scan_completion_order)["id"]
+            == expected[-1]
+        )
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    "migration",
+    [
+        pytest.param("pre-release", marks=pytest.mark.cross_platform),
+        pytest.param(
+            "linux-v3",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux generation conversion"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("unavailable", ["file-parent", "permission-error", "bounded-missing"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_identity_migrations_respect_git_availability_for_unavailable_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    migration: str,
+    unavailable: str,
+    configured: bool,
+) -> None:
+    repository = tmp_path / "healthy"
+    initialize_git_repository(repository)
+    connection, apply_migrations = create_historical_database(
+        67 if migration == "pre-release" else 68
+    )
+    import workbench_target as target
+    import workbench_target_state as state
+    from filesystem_identity import serialize_filesystem_identity
+
+    identity = state._repository_identity_details(repository)
+    assert identity is not None
+    stored_identity = identity.value if migration == "pre-release" else identity.previous_value
+    assert stored_identity is not None
+    timestamp = apply_migrations.__globals__["now"]()
+    if migration == "pre-release":
+        connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (67, 'persist repository identities', ?)",
+            (timestamp,),
+        )
+    missing = tmp_path / "unavailable" / "old-checkout"
+    if unavailable == "file-parent":
+        missing.parent.write_text("no longer a directory\n")
+    elif unavailable == "bounded-missing":
+        initialize_git_repository(missing.parent)
+    else:
+        original = target._protected_repository_root
+
+        def inaccessible(path: Path) -> Path:
+            if path == missing:
+                raise PermissionError("historical checkout is inaccessible")
+            return original(path)
+
+        monkeypatch.setattr(target, "_protected_repository_root", inaccessible)
+    connection.executemany(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at, "
+        "repository_identity) VALUES (?, ?, 'Saved checkout', ?, ?, ?)",
+        [
+            ("healthy", str(repository), timestamp, timestamp, stored_identity),
+            ("unavailable", str(missing), timestamp, timestamp, None),
+        ],
+    )
+    connection.execute(
+        "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+        "VALUES ('workspace', 'healthy', ?, ?, ?)",
+        (str(repository), timestamp, timestamp),
+    )
+    metadata = repository.stat()
+    connection.execute(
+        "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, "
+        "scan_dir, status, phase, started_at, completed_at, created_at, updated_at, "
+        "target_device, target_inode) "
+        "VALUES ('scan', 'workspace', 'healthy', ?, 'revision', '.', 'standard', "
+        "'/synthetic/output', 'complete', 'reporting', ?, ?, ?, ?, ?, ?)",
+        (
+            str(repository),
+            timestamp,
+            timestamp,
+            timestamp,
+            timestamp,
+            serialize_filesystem_identity(metadata.st_dev),
+            serialize_filesystem_identity(metadata.st_ino),
+        ),
+    )
+    if migration == "linux-v3":
+        connection.execute("UPDATE scans SET repository_generation = ?", (stored_identity,))
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    if configured:
+        host_git = shutil.which("git")
+        assert host_git is not None
+        monkeypatch.setenv("CODEX_SECURITY_GIT", host_git)
+    # The healthy legacy target has a saved Git identity but no recorded checkout root.
+    expected_identity = (
+        identity.value if configured else None if migration == "pre-release" else stored_identity
+    )
+    for _ in range(2):
+        apply_migrations(connection)
+        assert (
+            connection.execute(
+                "SELECT repository_identity FROM security_targets WHERE id = 'healthy'"
+            ).fetchone()[0]
+            == expected_identity
+        )
+        if migration == "linux-v3":
+            assert (
+                connection.execute("SELECT repository_generation FROM scans").fetchone()[0]
+                == expected_identity
+            )
+    connection.close()
+
+
+@pytest.mark.cross_platform
+def test_current_database_does_not_inspect_historical_git_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, apply_migrations = create_historical_database(68)
+    connection.executemany(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+        "VALUES (?, ?, 'Saved checkout', 'created', 'updated')",
+        [(str(index), f"/synthetic/history/{index}") for index in range(100)],
+    )
+    import workbench_target as target
+
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    with mock.patch.object(
+        target, "_protected_repository_root", wraps=target._protected_repository_root
+    ) as inspect_root:
+        apply_migrations(connection)
+        inspect_root.assert_not_called()
+    assert connection.execute("SELECT COUNT(*) FROM security_targets").fetchone()[0] == 100
+    connection.close()

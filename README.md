@@ -37,8 +37,8 @@ MiMo Code support is currently alpha.
 
 ## Quick start
 
-Requires Node.js 22.13.0 or later in the 22.x release line, Node.js 24.x or
-Node.js 26.x, and Python 3.10 or later.
+Requires Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, and Python 3.10+.
+Python 3.10 also requires `tomli`.
 
 ```bash
 npm install --global @bex-co/bex-security
@@ -50,6 +50,15 @@ Or run directly without a global installation:
 ```bash
 npx @bex-co/bex-security scan /path/to/repository --agent claude
 ```
+
+When the scan completes, open the Markdown file at the **REPORT** path in the
+terminal. Run `bex-security scans show` from the same repository to find its
+latest completed scan again. See [scan scope and follow-up work](sdk/typescript/docs/cli.md#understand-scan-scope-and-follow-up-work)
+for how to interpret exclusions in the report.
+
+`bex-security`, `codex-security`, and `cs` run the same CLI. If a name
+conflicts with another command, use `bex-security`. If npm reports an `EEXIST`
+conflict during a global install, use `npx @bex-co/bex-security` instead.
 
 The published npm package already contains the generated security plugin; the
 additional build steps below apply only to a source checkout.
@@ -75,6 +84,39 @@ export PATH="$PWD:$PATH"
 bex-security --help
 ```
 
+### Scan options
+
+Choose a scope and scan mode:
+
+```bash
+# Scan selected paths.
+bex-security scan . --path src --path tests
+
+# Exclude a directory from the scan.
+bex-security scan . --exclude-path examples/
+
+# Scan committed changes from a base revision to HEAD.
+bex-security scan . --diff origin/main
+
+# Run a deep scan of the repository.
+bex-security scan . --mode deep
+```
+
+Use `bex-security scan . --max-time 15` for an advisory 15-minute Standard
+investigation allowance. See [investigation time](sdk/typescript/docs/cli.md#set-investigation-time)
+for timing semantics and Deep Scan limits.
+
+Use `bex-security --help` to browse commands, or `bex-security scan --help`
+for scan options, cost limits, and patching after a scan.
+
+For an application spread across repositories, see
+[review one system across repositories](sdk/typescript/docs/cli.md#review-one-system-across-repositories).
+Use [bulk scans](sdk/typescript/docs/cli.md#bulk-scans) for independent repository
+reviews in one resumable campaign.
+
+Scans use existing root and component `SECURITY.md` guidance. To write or
+revise it, see [Generate SECURITY.md](#generate-securitymd).
+
 ## Why Bex Security
 
 - **Upstream-first, not a rewrite.** Bex uses a repeatable upstream `main`
@@ -84,9 +126,22 @@ bex-security --help
   and coding agents. Bex uses that boundary to support a growing ecosystem
   without building a bespoke integration for every client.
 - **Model choice today.** The inherited CLI already supports OpenAI,
-  OpenRouter, Fireworks, and Amazon Bedrock provider paths.
+  Amazon Bedrock, OpenRouter, Fireworks AI, and Cheaper Inference provider
+  paths.
 - **Security outcomes over raw output.** The workflow carries findings from
   discovery through validation, remediation, comparison, and publication.
+
+## Features
+
+- Scan repositories, selected paths, or Git changes. Deep scans repeat Standard scans and return their deduplicated findings.
+- Validate candidate findings, generate patches, and verify existing fixes.
+- Draft `SECURITY.md` policies and save threat models for later review.
+- Browse saved scans and findings, identify duplicates, assess severity against
+  your own rubric, and suggest owners from source and Git history.
+- Preview third-party scanner findings, save them locally, or publish supported reports to Codex Security Cloud. [Scanner import guides](docs/scanner-imports/README.md).
+- Track findings in Linear, Jira, or GitHub, publish completed scans, or export SARIF, JSON, and CSV. [Integration workflows](docs/plugin-connectors.md).
+- Automate scans across repositories or project components, including in CI and
+  containers.
 
 ## Project status
 
@@ -231,8 +286,8 @@ support first.
 ## Upstream compatibility
 
 Bex publishes the TypeScript SDK and CLI as `@bex-co/bex-security`. The
-`bex-security` command is primary, while `codex-security` remains a compatible
-alias for existing scripts. Bex releases use `upstreamVersion-bex.N` and record
+`bex-security` command is primary, while `codex-security` and `cs` remain
+compatible aliases for existing scripts. Bex releases use `upstreamVersion-bex.N` and record
 their upstream package version and commit in npm metadata. See the [upstream
 Codex Security documentation](https://learn.chatgpt.com/docs/security/cli) for
 the complete CLI reference and
@@ -240,12 +295,17 @@ the complete CLI reference and
 canonical changelog and upgrade notes.
 
 The wrapper forwards every argument to the Bex CLI. The TypeScript package also
-exposes `bex-security` as a bin alias while retaining `codex-security` for
-upstream compatibility.
+exposes `bex-security` as a bin alias while retaining `codex-security` and `cs`
+for upstream compatibility.
 
-Some cybersecurity requests and protected findings require approval through
-Trusted Access for Cyber. To join the program, visit
-[chatgpt.com/cyber](https://chatgpt.com/cyber).
+To use the upstream security workflows from a Codex session with the Codex
+Security plugin enabled, see the [agent workflow guide](docs/agent-workflows.md).
+
+Some cybersecurity requests and protected findings require
+[Trusted Access for Cyber](https://chatgpt.com/cyber). For accounts with Daybreak
+access, see [Daybreak opt-in](sdk/typescript/docs/cli.md#daybreak-opt-in) for the
+Codex toggle and [Cyber access programs](sdk/typescript/docs/cli.md#select-a-cyber-access-program)
+to select a program explicitly.
 
 ## Choose an agent
 
@@ -411,7 +471,7 @@ Common scan commands:
 ./bex-security scan . --agent mimo
 ./bex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 ./bex-security scan . --validation-prompt-file validation.md
-./bex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
+./bex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time 90
 ```
 
 For CI with Codex, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing
@@ -425,7 +485,7 @@ recipes created before agent selection also replay with Codex.
 
 Use `--validation-prompt-file` to replace final validation with your own setup,
 testing, and cleanup instructions. This works for standard and diff scans;
-Deep scans do not support it. See [custom validation](sdk/typescript/README.md#custom-validation).
+Deep scans do not support it. See [custom validation](sdk/typescript/docs/cli.md#custom-validation).
 For a runnable local example, see the [custom validation demo](examples/custom-validation/README.md).
 Environment API keys are passed directly to the current scan and are never
 stored in Codex's credential home or system keyring.
@@ -439,9 +499,10 @@ Use `--patch --patch-severity high` to fix high and critical findings. Add
 verified files and open a draft GitHub pull request. Ordinary scans do not
 change repository files.
 
-Deep-scan discovery stops after 96 hours by default. Set `--max-time-hours` to
-any positive number of hours, including fractional hours, up to 96. Completed
-findings are preserved and returned when the limit is reached.
+Deep-scan discovery stops after 5760 minutes (96 hours) by default. Set
+`--max-time` to any positive number of minutes, including fractional minutes,
+up to 5760. Completed findings are preserved and returned when the limit is
+reached. `--max-time-hours` remains a deprecated Deep-only alias in hours.
 
 For a monorepo, run separate standard scans and combine their results by root
 cause:
@@ -453,7 +514,7 @@ cause:
 ```
 
 Use `--auto` to let Codex choose the components, or `--auto --plan-only` to
-review the split first. See [component scans](sdk/typescript/README.md#scan-project-components)
+review the split first. See [component scans](sdk/typescript/docs/cli.md#scan-project-components)
 for reusable plans, combined reports, and coverage details.
 
 To use another inference provider, set its API key and select a model:
@@ -495,11 +556,13 @@ unset OPENAI_API_KEY CODEX_API_KEY
 
 Scan history is stored in the Bex Security workbench state directory. If that
 directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
-directory outside the repository.
+directory outside the repository. Linked Git worktrees share scan history and
+saved findings when they use the same state directory. See the
+[scan history guide](sdk/typescript/docs/cli.md#scan-history-and-reruns).
 
 Applications can attribute API-key scans to an end user with
 `scan --safety-identifier ID` or the SDK's per-run `safetyIdentifier` option.
-See [Safety ID setup and runtime requirements](sdk/typescript/README.md#attribute-scans-to-end-users).
+See [Safety ID setup and runtime requirements](sdk/typescript/docs/cli.md#attribute-scans-to-end-users).
 
 `findings list [repository]` shows open findings across a repository's scans
 and identifies findings not confirmed in its latest scan.
@@ -585,49 +648,88 @@ sessions. These events can contain credentials.
 
 ## Generate SECURITY.md
 
-Draft repository-wide or component-scoped `SECURITY.md` guidance for future scans:
+Use `policy` to draft a new `SECURITY.md` or update an existing one. Use `--path`
+to select a component:
 
 ```bash
-npx @bex-co/bex-security policy .
-npx @bex-co/bex-security policy . --path services/api --knowledge-base architecture.md
+bex-security policy .
+bex-security policy . --path services/api --knowledge-base architecture.md
 ```
 
-The command saves a draft outside the checkout; it does not install it or run a
-vulnerability scan. Review the proposed diff before copying the policy. Supporting architecture,
-threat-model, and review documents stay outside the repository and may contain
-sensitive details. See the [SDK policy guide](sdk/typescript/README.md#generate-a-security-policy)
-for headless generation, saved artifacts, and SDK usage.
+The command saves its draft outside the repository and leaves existing files
+unchanged. Review the diff and notes, edit the draft, then copy only `SECURITY.md`
+to the displayed **Policy target**. Keep the saved architecture and threat-model
+documents outside the repository.
+
+Scans already use root and component `SECURITY.md` files. Keep your current policy
+if it needs no changes. When updating it, preserve its vulnerability-reporting
+instructions. If the command says the policy is already up to date, no copy is
+needed.
+
+Files at `.github/SECURITY.md` or `docs/SECURITY.md` often contain reporting
+instructions. Preserve them when drafting a policy; those locations do not
+automatically provide repository-wide scan guidance. See the
+[policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy) for policy
+locations, unanswered questions, saved artifacts, and SDK usage.
 
 ## TypeScript SDK
 
-To suggest owners for existing findings from source and Git history, see
-[Suggest finding owners](sdk/typescript/README.md#suggest-finding-owners).
+Install the package locally in your TypeScript project:
 
-Codex Security is a Javascript package:
+```bash
+npm install @bex-co/bex-security
+```
+
+Then import it:
 
 ```ts
 import { CodexSecurity } from "@bex-co/bex-security";
 
 const security = new CodexSecurity();
-const result = await security.run("/path/to/directory");
-await security.run("/path/to/directory", {
-  mode: "deep",
-  workers: 2,
-  subagents: 0,
-  stopAfterNoNew: 3,
-  maxDiscoveryRuns: 10,
-  maxTimeHours: 1.5,
-});
 
-console.log(result.reportPath);
-await security.close();
+try {
+  const result = await security.run("/path/to/repository");
+  console.log(result.reportPath);
+} finally {
+  await security.close();
+}
 ```
+
+Pass `new CodexSecurity({ agent: "claude" })` to select another ACP agent; see
+the [package README](sdk/typescript/README.md#select-an-agent-from-typescript).
+The [SDK guide](sdk/typescript/docs/sdk.md) includes deep-scan configuration,
+validation, severity classification, owner suggestions, and result handling.
+
+## Read existing Cloud findings
+
+When Codex Security Cloud is available to your account, the Security plugin's
+`$cloud-findings` skill can read findings, reports, recorded assignment and
+verification, and scan status in Codex desktop or the Codex CLI. Cloud is an
+optional connection; local scans work without it.
+
+See [Cloud connection setup and CLI reads](sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
+for authentication requirements and a read-only example.
+
+## Save and export threat models
+
+Scans and policy generation save threat models with their results. Export a saved
+model without starting another analysis:
+
+```bash
+bex-security export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+```
+
+Omit `--scan` to use the current repository's latest completed scan. The
+[export guide](sdk/typescript/docs/cli.md#exports-and-ci) also covers findings,
+SARIF output for CI, and the offline TypeScript API. For ServiceNow Application
+Vulnerability Response, see [Export findings for ServiceNow](sdk/typescript/docs/cli.md#export-findings-for-servicenow).
 
 ## Containerized bulk scans
 
-Use the upstream image and included Docker Compose configuration for
-noninteractive, resumable scans of repositories pinned to immutable Git
-revisions. See the [container quick start](sdk/typescript/README.md#containerized-bulk-scans)
+Scan a list of repositories with the included Docker Compose configuration,
+which keeps results and authentication between runs. Repositories are pinned to
+immutable Git revisions. See the
+[container quick start](sdk/typescript/docs/cli.md#containerized-bulk-scans)
 for authentication, private result storage, and optional Ubuntu AppArmor
 hardening.
 
@@ -639,45 +741,35 @@ CSV column for repository-specific instructions. Use
 `--post-scan-prompt-file PATH` to run a follow-up after each scan, including
 incomplete or failed scans.
 
-For individual CLI stages with durable state and access to a separately deployed
-findings service, use the same scanner image with the
-[workflow runner Compose example](docker/README.md#workflow-runner).
+The [workflow runner](docker/README.md#workflow-runner) runs individual CLI stages
+in containers and can connect to a separately deployed findings service.
 
-## Findings service (preview)
+## Findings storage and deduplication
 
-Run `bex-security serve` to start the service without Docker. See
-[running without Docker](sdk/typescript/README.md#running-without-docker)
-for prerequisites, credentials, and storage configuration.
+The [findings guide](sdk/typescript/docs/findings-service.md) covers local
+storage, deduplication, and compatibility with independently operated endpoints
+through `publish scan --to custom` and explicit `--findings-url`. The local
+`serve` command and browser dashboard have been removed; existing databases and
+scan artifacts remain available.
 
-The [findings service](sdk/typescript/README.md#findings-service-preview) runs
-from the same `ghcr.io/openai/codex-security` image as the scanner (or a local
-source build), with a separate container and state volume configured by
-`compose.findings.yaml`. It stores findings and embeddings in SQLite and lists
-findings with pagination. Its read-only dashboard at `/dashboard` refreshes every
-five seconds and shows stored findings and duplicate groups from the service's
-database. It also returns potential duplicates by embedding similarity within a
-repository or an explicit all-repository scope. The
-`bex-security publish scan --to custom --findings-url http://localhost:3000`
-command uploads completed findings and their repository ID. The SDK and
-`bex-security dedupe` command retrieve candidates, run independent reviews
-locally, and persist accepted duplicate groups; `--all-repositories`
-opts into the broader scope.
-
-Use `npx @bex-co/bex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md`
+Use `bex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md`
 to assess selected findings under your own policy before publishing tickets.
 Scan classification checkpoints each finding in SQLite and reuses matching
 assessments on reruns; `--reprocess` forces reassessment. The SDK exposes the same
-classification operation; original scan severity stays unchanged. See [severity classification](sdk/typescript/README.md#classify-finding-severity).
+classification operation; original scan severity stays unchanged. See
+[severity classification](sdk/typescript/docs/cli.md#classify-finding-severity).
 
 ## Other providers
 
-To use another inference provider, set its API key and select a model:
+Codex scans support OpenAI, Amazon Bedrock, OpenRouter, Fireworks AI, and Cheaper
+Inference. Bedrock uses AWS credentials and does not require a separate OpenAI
+login. See [Bedrock setup](docs/bedrock.md) for AWS profiles, regions, and model
+access.
+
+For OpenRouter, Fireworks AI, and Cheaper Inference, set the provider's API key and choose a supported
+model:
 
 ```bash
-export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
-export AWS_REGION="us-east-2"
-bex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
-
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
 bex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
@@ -685,14 +777,30 @@ export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 bex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
 ```
 
+See [provider configuration](sdk/typescript/docs/cli.md#native-command-authentication-and-other-providers)
+for more examples. Claude Code, Kimi Code, Muse Code, Qwen Code, and MiMo Code
+own their provider configuration; see [Choose an agent](#choose-an-agent).
+
 ## Documentation
 
-See [project configuration](docs/project-configuration.md) for reusable YAML/JSON
-settings, CLI overrides, and editor schema support.
+- [Package README](sdk/typescript/README.md)
+- [CLI reference](sdk/typescript/docs/cli.md)
+- [SDK guide](sdk/typescript/docs/sdk.md)
+- [Agent workflows and recovery](docs/agent-workflows.md)
+- [Imported finding identity and evidence](docs/scanner-imports/schema-guide.md)
+- [Project configuration](docs/project-configuration.md) for reusable YAML/JSON
+  settings, CLI overrides, and editor schema support
+- [Examples](examples/README.md)
+- [Upstream GitHub Action guide](github-action/README.md)
+- [Upstream Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)
+  for upstream behavior this fork keeps
 
-For complete command help, runtime defaults, native multi-agent worker limits,
-environment variables, deep-scan configuration, and SDK options, see the
-[package README](sdk/typescript/README.md) and the
-[upstream CLI reference](https://learn.chatgpt.com/docs/security/cli/reference).
-Upstream behavior this fork keeps is documented in the
-[Codex Security documentation](https://learn.chatgpt.com/docs/security/cli).
+To report a vulnerability privately, follow the [security policy](SECURITY.md).
+
+## Citation
+
+[CITATION.cff](CITATION.cff) describes the upstream Codex Security project. To
+cite it, match the citation's version to the upstream baseline recorded in this
+package's `bex.upstreamVersion` metadata and use the publication date from that
+version's `npm-vX.Y.Z` entry in
+[upstream GitHub Releases](https://github.com/openai/codex-security/releases).

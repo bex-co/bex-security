@@ -1,5 +1,8 @@
-import { readFile } from "node:fs/promises";
+import { isUtf8 } from "node:buffer";
+import { existsSync, statSync } from "node:fs";
+import { readFile, realpath } from "node:fs/promises";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -9,22 +12,21 @@ import {
 } from "node:path";
 import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
-import { parseDocument } from "yaml";
 import {
   DEFAULT_CODEX_CONFIG,
   mergeCodexOverrides,
   type JsonObject,
 } from "./config.js";
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, errorMessage } from "./errors.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
-import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
+import type { AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
 import {
   projectConfigJsonSchema,
   type ProjectConfigInput,
   type ProjectScope,
 } from "./project-config-schema.js";
-import { expandHome } from "./runtime.js";
+import { expandHomeForLookup, resolveInputPath } from "./runtime.js";
 import { PACKAGE_NAME } from "./version.js";
 import {
   DEFAULT_SCAN_AUTH,
@@ -48,6 +50,7 @@ export interface ProjectConfigSource {
 }
 
 export interface ResolvedProjectConfig {
+  exploitability?: ProjectConfigInput["exploitability"];
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
   sources: ConfigurationSources;
@@ -58,7 +61,11 @@ export type ConfigurationSource = "default" | "legacy" | "project" | "cli";
 const PROJECT_SETTING_KEYS = {
   auth: "auth",
   mode: "scan.mode",
+  maxTimeMinutes: "scan.max_time_minutes",
+  cyberAccessProgram: "scan.cyber_access_program",
+  ownerSuggestions: "scan.owner_suggestions",
   target: "scan.scope",
+  excludePaths: "scan.exclude_paths",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
   validationPromptFile: "scan.validation_file",
@@ -131,22 +138,37 @@ export async function readProjectConfig(
   file: string,
   directory = process.cwd(),
 ): Promise<ProjectConfigSource> {
-  const path = resolve(directory, expandHome(file));
+  const selected = expandHomeForLookup(file);
+  const requested = isAbsolute(selected)
+    ? selected
+    : `${directory || "."}${sep}${selected}`;
+  const traversesParent = sep === "/" && requested.split("/").includes("..");
+  let path = traversesParent ? requested : resolve(directory, selected);
   const extension = projectConfigExtension(path);
   let text: string;
   try {
+    // Resolve the parent through the filesystem while retaining the selected filename.
+    if (traversesParent) {
+      const parent = await realpath(dirname(path), { encoding: "buffer" });
+      if (!isUtf8(parent))
+        throw new Error(
+          "The resolved configuration directory is not a valid UTF-8 path.",
+        );
+      path = resolve(parent.toString(), basename(path));
+    }
     text = await readFile(path, "utf8");
   } catch (error) {
     throw new ConfigurationError(
-      `Cannot read project configuration at ${path}.`,
+      `Cannot read project configuration at ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }
   let value: unknown;
   try {
     if (extension === ".json") {
-      value = JSON.parse(text);
+      value = JSON.parse(text.replace(/^\uFEFF/u, ""));
     } else {
+      const { parseDocument } = await import("yaml");
       const document = parseDocument(text, { prettyErrors: false });
       if (document.errors.length > 0) throw document.errors[0];
       // Keep YAML's expansion guard while allowing repeated native profiles.
@@ -154,7 +176,7 @@ export async function readProjectConfig(
     }
   } catch (error) {
     throw new ConfigurationError(
-      `Cannot parse project configuration at ${path}.`,
+      `Cannot parse project configuration at ${path}: ${errorMessage(error)}`,
       { cause: error },
     );
   }
@@ -186,14 +208,17 @@ export function projectConfigStarter(
   );
   const schema = isAbsolute(relativeSchema)
     ? pathToFileURL(schemaPath).href
-    : `${relativeSchema.startsWith(".") ? "" : "./"}${relativeSchema
-        .split(sep)
-        .join("/")}`;
+    : `${relativeSchema.startsWith(".") ? "" : "./"}${encodeURI(
+        relativeSchema.split(sep).join("/"),
+      ).replace(/[#?]/gu, encodeURIComponent)}`;
+  const hasSchema = existsSync(schemaPath);
   if (projectConfigExtension(path) === ".json")
-    return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
+    return `${JSON.stringify(hasSchema ? { $schema: schema } : {}, null, 2)}\n`;
   return [
     "# This file is trusted like CLI options. Keep it outside untrusted inputs.",
-    `$schema: ${schema}`,
+    ...(hasSchema
+      ? [`$schema: ${schema}`]
+      : ["# Replace the empty mapping below when enabling settings.", "{}"]),
     "",
     "# Uncomment the settings you want to override. Defaults remain unpinned.",
     `# auth: ${DEFAULT_SCAN_AUTH}`,
@@ -201,11 +226,13 @@ export function projectConfigStarter(
     `#   mode: ${DEFAULT_SCAN_MODE}`,
     "#   scope:",
     "#     paths: [src] # Relative to each selected repository.",
+    "#   exclude_paths: [examples] # Relative to each selected repository.",
     "#   knowledge_base: [] # Paths relative to this file.",
     "#   instructions_file: instructions.md",
     "#   validation_file: validation.md # Standard mode only.",
+    "#   max_time_minutes: 15 # Advisory in Standard; enforced discovery limit in Deep.",
     "#   deep: # Used when mode is deep.",
-    ...DEEP_SCAN_SETTINGS.map(
+    ...DEEP_SCAN_SETTINGS.filter(([name]) => name !== "maxTimeHours").map(
       ([name, , key]) => `#     ${key}: ${DEFAULT_DEEP_SCAN_SETTINGS[name]}`,
     ),
     "# codex:",
@@ -241,6 +268,33 @@ function requireProjectConfig(
   }
 }
 
+function outputPath(
+  value: string | undefined,
+  directory: string,
+): AbsolutePath | undefined {
+  if (value === undefined) return;
+  const requested = resolveInputPath(value, directory);
+  const parts = requested.split(sep);
+  const parent = parts.lastIndexOf("..");
+  if (parent < 0) return requested;
+  const prefix = parts.slice(0, parent + 1).join(sep);
+  try {
+    // Keep a redirected traversal intact for output validation.
+    const selected = statSync(prefix, { bigint: true, throwIfNoEntry: false });
+    if (selected !== undefined) {
+      const lexical = statSync(resolve(prefix), {
+        bigint: true,
+        throwIfNoEntry: false,
+      });
+      if (selected.dev !== lexical?.dev || selected.ino !== lexical.ino)
+        return requested;
+    }
+  } catch {
+    return requested;
+  }
+  return resolve(requested) as AbsolutePath;
+}
+
 export function resolveScanSettings(
   project: ProjectConfigSource | undefined,
   overrides: Partial<ScanSettings> & { codexOverrides?: JsonObject },
@@ -266,15 +320,17 @@ export function resolveScanSettings(
   };
   const projectDirectory = project?.directory ?? directory;
   const filePath = (value: string | undefined): AbsolutePath | undefined =>
-    value === undefined
-      ? undefined
-      : resolveConfigPath(projectDirectory, value);
+    value === undefined ? undefined : resolveInputPath(value, projectDirectory);
   const cliPath = (value: string | undefined): AbsolutePath | undefined =>
-    value === undefined ? undefined : resolveConfigPath(directory, value);
+    value === undefined ? undefined : resolveInputPath(value, directory);
 
   const mode =
     choose("scan.mode", file?.scan?.mode, overrides.mode) ?? DEFAULT_SCAN_MODE;
-  const explicitDeep = deepScanOptions({ ...overrides, mode });
+  const explicitDeep = deepScanOptions({
+    ...overrides,
+    maxTimeMinutes: undefined,
+    mode,
+  });
   const target =
     choose(
       "scan.scope",
@@ -282,12 +338,22 @@ export function resolveScanSettings(
       overrides.target,
     ) ?? "repository";
   const configuredDeep = file?.scan?.deep;
+  const explicitTime =
+    overrides.maxTimeMinutes !== undefined ||
+    overrides.maxTimeHours !== undefined;
+  const maxTimeMinutes = choose(
+    "scan.max_time_minutes",
+    explicitTime ? undefined : file?.scan?.max_time_minutes,
+    overrides.maxTimeMinutes,
+  );
   const deep: DeepScanOptions = {};
   if (mode === "deep") {
     for (const [name, , field] of DEEP_SCAN_SETTINGS) {
       const value = choose(
         `scan.deep.${field}`,
-        configuredDeep?.[field],
+        name === "maxTimeHours" && explicitTime
+          ? undefined
+          : configuredDeep?.[field],
         explicitDeep[name],
       );
       if (value !== undefined) deep[name] = value;
@@ -298,6 +364,18 @@ export function resolveScanSettings(
     file?.codex ?? {},
     overrides.codexOverrides ?? {},
   );
+  const nativeSourceTree = (
+    value: JsonObject,
+    source: ConfigurationSource,
+  ): JsonObject =>
+    Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        item !== null && typeof item === "object" && !Array.isArray(item)
+          ? nativeSourceTree(item, source)
+          : source,
+      ]),
+    );
   const recordNativeSources = (
     value: JsonObject,
     source: ConfigurationSource,
@@ -306,34 +384,55 @@ export function resolveScanSettings(
     for (const [key, item] of Object.entries(value)) {
       const path: `codex.${string}` = `${prefix}.${key}`;
       if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-        delete sources[path];
         recordNativeSources(item, source, path);
-      } else {
-        for (const existing of Object.keys(sources) as ProvenanceKey[]) {
-          if (existing.startsWith(`${path}.`)) delete sources[existing];
-        }
+      } else if (item === source) {
         sources[path] = source;
       }
     }
   };
-  recordNativeSources(DEFAULT_CODEX_CONFIG, "default");
-  recordNativeSources(file?.codex ?? {}, "project");
-  recordNativeSources(overrides.codexOverrides ?? {}, "cli");
+  // Match the value merge: defaults beneath the combined project/CLI overrides.
+  const nativeSources = mergeCodexOverrides(
+    nativeSourceTree(DEFAULT_CODEX_CONFIG, "default"),
+    mergeCodexOverrides(
+      nativeSourceTree(file?.codex ?? {}, "project"),
+      nativeSourceTree(overrides.codexOverrides ?? {}, "cli"),
+    ),
+  );
+  // Literal dotted keys can share a flattened name; retain layer precedence.
+  for (const source of ["default", "project", "cli"] as const) {
+    recordNativeSources(nativeSources, source);
+  }
   const knowledgeBasePaths =
     choose(
       "scan.knowledge_base",
       file?.scan?.knowledge_base?.map((value) =>
-        resolveConfigPath(projectDirectory, value),
+        resolveInputPath(value, projectDirectory),
       ),
       overrides.knowledgeBasePaths?.map((value) =>
-        resolveConfigPath(directory, value),
+        resolveInputPath(value, directory),
       ),
     ) ?? [];
   const settings: ResolvedScanSettings = {
     ...pickScanSettings(overrides),
     auth: choose("auth", file?.auth, overrides.auth) ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram: choose(
+      "scan.cyber_access_program",
+      file?.scan?.cyber_access_program,
+      overrides.cyberAccessProgram,
+    ),
     mode,
+    maxTimeMinutes,
     target,
+    excludePaths: choose(
+      "scan.exclude_paths",
+      file?.scan?.exclude_paths,
+      overrides.excludePaths,
+    ),
+    ownerSuggestions: choose(
+      "scan.owner_suggestions",
+      file?.scan?.owner_suggestions,
+      overrides.ownerSuggestions,
+    ),
     knowledgeBasePaths,
     scanPromptFile: choose(
       "scan.instructions_file",
@@ -348,8 +447,8 @@ export function resolveScanSettings(
     postScanPromptFile: cliPath(overrides.postScanPromptFile),
     outputDir: choose(
       "output.directory",
-      filePath(file?.output?.directory),
-      cliPath(overrides.outputDir),
+      outputPath(file?.output?.directory, projectDirectory),
+      outputPath(overrides.outputDir, directory),
     ),
     failureSeverity: choose(
       "policy.fail_on_severity",
@@ -368,6 +467,9 @@ export function resolveScanSettings(
     config: { codexOverrides },
     options: settings,
     sources: resolvedSources,
+    ...(file?.exploitability === undefined
+      ? {}
+      : { exploitability: structuredClone(file.exploitability) }),
     ...(project?.path === undefined
       ? {}
       : { projectConfig: { path: project.path, sources: resolvedSources } }),

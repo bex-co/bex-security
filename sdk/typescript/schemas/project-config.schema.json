@@ -21,6 +21,20 @@
           "type": "string",
           "enum": ["standard", "deep"]
         },
+        "max_time_minutes": {
+          "description": "Investigation minutes: advisory in Standard (default: unset); enforced Deep discovery limit (default and maximum: 5760). Scans may finish early; reporting may run longer.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "cyber_access_program": {
+          "description": "Experimental Cyber access program for scan turns (OpenAI provider only). Omit to preserve Codex defaults.",
+          "type": "string",
+          "enum": ["standard", "daybreak_blue", "daybreak_red"]
+        },
+        "owner_suggestions": {
+          "description": "Generate optional owner-suggestions.json after a committed scan (default: false).",
+          "type": "boolean"
+        },
         "scope": {
           "description": "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
           "anyOf": [
@@ -76,6 +90,11 @@
               "additionalProperties": false
             }
           ]
+        },
+        "exclude_paths": {
+          "description": "Literal files or directories relative to the selected repository. Exclusions take precedence over inclusions.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
         },
         "knowledge_base": {
           "description": "Context files or directories, relative to this file. An empty list selects no additional context.",
@@ -133,13 +152,229 @@
             },
             "max_time_hours": {
               "default": 96,
-              "description": "Maximum deep-scan discovery hours (default: 96; maximum: 96).",
+              "deprecated": true,
+              "description": "Deprecated Deep-only alias for maxTimeMinutes / --max-time, in hours (default: 96; maximum: 96).",
               "type": "number",
               "exclusiveMinimum": 0,
               "maximum": 96
             }
           },
           "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "exploitability": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "description": "Complete set of caller-supplied source endpoints for the investigated scenario. An empty list closes this boundary.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "function": { "type": "string", "minLength": 1 },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    { "type": "string", "minLength": 1 },
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  ]
+                }
+              },
+              "runtime_selectors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "location": { "type": "string", "minLength": 1 },
+                    "binary": { "type": "string", "minLength": 1 },
+                    "line": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": ["name"],
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" },
+                  "if": { "properties": { "line": {} }, "required": ["line"] },
+                  "then": {
+                    "properties": { "location": {} },
+                    "required": ["location"]
+                  }
+                }
+              },
+              "package": { "type": "string", "minLength": 1 },
+              "symbol": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "file": { "type": "string", "minLength": 1 },
+              "binary": { "type": "string", "minLength": 1 },
+              "line": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "location": { "type": "string", "minLength": 1 },
+              "evidence": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "relationships": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "maps_to",
+                        "reaches",
+                        "produces",
+                        "writes_cache",
+                        "creates_async"
+                      ]
+                    },
+                    "endpoint_id": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["kind", "endpoint_id"],
+                  "additionalProperties": false
+                }
+              },
+              "scope": { "type": "string", "minLength": 1 }
+            },
+            "required": ["function"],
+            "additionalProperties": false
+          }
+        },
+        "sinks": {
+          "description": "Complete set of caller-supplied sink endpoints for the investigated scenario. An empty list closes this boundary.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "function": { "type": "string", "minLength": 1 },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    { "type": "string", "minLength": 1 },
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  ]
+                }
+              },
+              "runtime_selectors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "location": { "type": "string", "minLength": 1 },
+                    "binary": { "type": "string", "minLength": 1 },
+                    "line": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": ["name"],
+                  "additionalProperties": { "$ref": "#/definitions/__schema0" },
+                  "if": { "properties": { "line": {} }, "required": ["line"] },
+                  "then": {
+                    "properties": { "location": {} },
+                    "required": ["location"]
+                  }
+                }
+              },
+              "package": { "type": "string", "minLength": 1 },
+              "symbol": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "file": { "type": "string", "minLength": 1 },
+              "binary": { "type": "string", "minLength": 1 },
+              "line": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "location": { "type": "string", "minLength": 1 },
+              "evidence": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "relationships": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "maps_to",
+                        "reaches",
+                        "produces",
+                        "writes_cache",
+                        "creates_async"
+                      ]
+                    },
+                    "endpoint_id": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["kind", "endpoint_id"],
+                  "additionalProperties": false
+                }
+              },
+              "scope": { "type": "string", "minLength": 1 }
+            },
+            "required": ["function"],
+            "additionalProperties": false
+          }
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "instructions": {
+              "description": "Caller-provided investigation boundaries and assumptions.",
+              "type": "string",
+              "minLength": 1
+            },
+            "exclude_paths": {
+              "description": "Literal checkout-relative paths to omit from broad discovery. Exact source or build evidence can reopen a path.",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          },
+          "additionalProperties": false
+        },
+        "evidence_sources": {
+          "description": "MCP servers the investigator can query during a reviewed dependency check.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "server": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Server name in codex.mcp_servers."
+              },
+              "instructions": {
+                "type": "string",
+                "pattern": "\\S",
+                "description": "When to use this server and what evidence its tools can provide."
+              }
+            },
+            "required": ["server", "instructions"],
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -152,7 +387,7 @@
         "model_reasoning_effort": { "type": "string", "minLength": 1 },
         "model_provider": { "type": "string", "minLength": 1 }
       },
-      "additionalProperties": { "$ref": "#/definitions/__schema0" }
+      "additionalProperties": { "$ref": "#/definitions/__schema1" }
     },
     "limits": {
       "type": "object",
@@ -201,6 +436,20 @@
           "type": "object",
           "propertyNames": { "type": "string" },
           "additionalProperties": { "$ref": "#/definitions/__schema0" }
+        }
+      ]
+    },
+    "__schema1": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "items": { "$ref": "#/definitions/__schema1" } },
+        {
+          "type": "object",
+          "propertyNames": { "type": "string" },
+          "additionalProperties": { "$ref": "#/definitions/__schema1" }
         }
       ]
     }

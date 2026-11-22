@@ -5,6 +5,13 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function abortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    new DOMException("The operation was aborted.", "AbortError")
+  );
+}
+
 /** Base error for Codex Security SDK failures. */
 export class CodexSecurityError extends Error {
   public constructor(message: string, options?: ErrorOptions) {
@@ -36,9 +43,11 @@ export class DeduplicationReviewError extends CodexSecurityError {
   }
 }
 
+export class CodexConnectionError extends CodexSecurityError {}
 export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}
+export class LocalPluginBootstrapError extends PluginBootstrapError {}
 export class PluginPythonUnavailableError extends PluginBootstrapError {}
 export class SandboxUnavailableError extends CodexSecurityError {}
 export class InvalidTargetError extends CodexSecurityError {}
@@ -46,16 +55,19 @@ export class OutputDirectoryError extends CodexSecurityError {}
 export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
   public constructor(
     public readonly directory: string,
-    operation: "scan" | "policy" = "scan",
+    operation: "scan" | "policy" | "component" = "scan",
   ) {
     super(
-      operation === "policy"
-        ? `Policy output directory is not empty: ${directory}. Choose a new or empty directory.`
-        : `Scan output directory is not empty: ${directory}. To keep the existing results and start a new scan, add --archive-existing.`,
+      operation === "component"
+        ? `Component output directory is not empty: ${directory}. Choose a new or empty directory with --output-dir.`
+        : operation === "policy"
+          ? `Policy output directory is not empty: ${directory}. Choose a new or empty directory.`
+          : `Scan output directory is not empty: ${directory}. To keep the existing results and start a new scan, add --archive-existing.`,
     );
   }
 }
-export type ProtectedScanPathKind = "output" | "temporary" | "runtime";
+export type ProtectedScanPathKind =
+  "output" | "state" | "temporary" | "runtime";
 
 export class OutputInsideProtectedRootError extends OutputDirectoryError {
   public constructor(
@@ -64,7 +76,14 @@ export class OutputInsideProtectedRootError extends OutputDirectoryError {
     public readonly pathKind: ProtectedScanPathKind = "output",
   ) {
     super(
-      `Scan ${pathKind} directory must be outside the protected scan root: ${outputDirectory}`,
+      pathKind === "state"
+        ? [
+            "Codex Security state directory must be outside the protected scan root and cannot contain it.",
+            `  Resolved path:  ${outputDirectory}`,
+            `  Protected root: ${protectedRoot}`,
+            "Set CODEX_SECURITY_STATE_DIR to a private directory that does not overlap the protected root. For hosted scans, set stateDirectory on the request.",
+          ].join("\n")
+        : `Scan ${pathKind} directory must be outside the protected scan root: ${outputDirectory}`,
     );
   }
 }
@@ -89,7 +108,7 @@ export class ScanCostLimitExceededError extends ScanInterruptedError {
     scanDir: string,
   ) {
     super(
-      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; partial output remains at ${scanDir}.`,
+      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; scan output directory: ${scanDir}.`,
       scanDir,
     );
     this.maxCostUsd = maxCostUsd;

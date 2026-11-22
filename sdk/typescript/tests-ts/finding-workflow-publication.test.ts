@@ -1,6 +1,7 @@
+import { emptyNeighborhoodReviewer } from "./support/deduplication.js";
 import { readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { expect, test } from "bun:test";
+import { expect, test, mock } from "bun:test";
 import type { JsonObject } from "../src/config.js";
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
 import {
@@ -11,8 +12,10 @@ import {
 import type { DeduplicationReviewer } from "../src/deduplication/deduplication-reviewer.js";
 import type { ScanManifest } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { prepareScanPublication } from "../src/publication.js";
 import { scriptedWorkbench } from "./support/workbench-fakes.js";
 import { workflowFixture } from "./support/workflow-fixture.js";
+import { rejecting } from "./support/errors.js";
 
 type Step = Parameters<typeof scriptedWorkbench>[0][number];
 
@@ -52,6 +55,9 @@ test("deduplicates an external scan through its bound workflow without reading s
   const result: DeduplicateScanResult = {
     scanId: document.scanId,
     uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+    scanRepresentativeFindingIds: document.findings.map(
+      (finding) => finding.findingId,
+    ),
     duplicateGroups: [],
     deduplicationStatus: "completed",
   };
@@ -124,12 +130,11 @@ test("deduplicates an external scan through its bound workflow without reading s
   expect(
     await deduplicateScanDirectoryInternal(scanDir, options, {
       environment,
-      runWorkbench: (args, input) =>
-        workbench.run(
-          { environment, pluginRoot: PLUGIN_ROOT, python: "unused" },
-          args,
-          input,
-        ),
+      runWorkbench: workbench.run.bind(workbench, {
+        environment,
+        pluginRoot: PLUGIN_ROOT,
+        python: "unused",
+      }),
       fetch: async (url, init) => {
         requests.push(String(url));
         expect(init.method).toBeUndefined();
@@ -138,14 +143,7 @@ test("deduplicates an external scan through its bound workflow without reading s
           potentialDuplicates: [],
         });
       },
-      reviewer: {
-        async screen() {
-          throw new Error("No review for an empty neighborhood");
-        },
-        async reviewPair() {
-          throw new Error("No pair to review");
-        },
-      },
+      reviewer: emptyNeighborhoodReviewer(),
     }),
   ).toEqual(result);
   expect(requests).toEqual([
@@ -185,7 +183,20 @@ test("failed publication records its error, dry-run does not advance it, and ret
     },
     ...publicationBinding(id, document.scanId, scanDir),
     begin,
-    { request: { id, action: "complete", stage: "publish", result } },
+    {
+      request: {
+        id,
+        action: "complete",
+        stage: "publish",
+        result: {
+          ...result,
+          telemetry: expect.objectContaining({
+            destination: "custom",
+            outcome: "completed",
+          }),
+        },
+      },
+    },
   ]);
   await expect(
     publishScanToCustomInternal(scanDir, options, {
@@ -202,12 +213,18 @@ test("failed publication records its error, dry-run does not advance it, and ret
       {
         environment,
         runWorkbench: dryRunWorkbench.run,
-        fetch: async () => {
-          throw new Error("Dry-run must not publish");
-        },
+        fetch: rejecting("Dry-run must not publish"),
       },
     ),
-  ).toEqual({ ...result, dryRun: true, findings: document.findings });
+  ).toEqual({
+    ...result,
+    dryRun: true,
+    findings: document.findings,
+    telemetry: expect.objectContaining({
+      outcome: "preview",
+      attempted: false,
+    }),
+  });
   dryRunWorkbench.assertDone();
   expect(
     await publishScanToCustomInternal(scanDir, options, {
@@ -215,7 +232,13 @@ test("failed publication records its error, dry-run does not advance it, and ret
       runWorkbench: workbench.run,
       fetch: async () => Response.json(result.findingIds),
     }),
-  ).toEqual(result);
+  ).toEqual({
+    ...result,
+    telemetry: expect.objectContaining({
+      outcome: "completed",
+      attempted: true,
+    }),
+  });
   workbench.assertDone();
 });
 
@@ -226,14 +249,15 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
     const { scanDir, repository, environment, document } = fixture;
     const originals = [
       document.findings[0]!,
-      { ...document.findings[0]!, findingId: `csf_${"f".repeat(24)}` },
+      { ...document.findings[0]!, findingId: `csf_${"0".repeat(24)}` },
     ];
     const id = `write-${failure}`;
     const options = { workflowId: id, findingsUrl: "http://synthetic.test" };
-    const groups = [originals.map((finding) => finding.findingId)];
+    const groups = [[originals[1]!.findingId, originals[0]!.findingId]];
     const result: DeduplicateScanResult = {
       scanId: document.scanId,
-      uniqueFindingIds: [originals[0]!.findingId],
+      uniqueFindingIds: [originals[1]!.findingId],
+      scanRepresentativeFindingIds: [originals[0]!.findingId],
       duplicateGroups: groups,
       deduplicationStatus: "completed",
     };
@@ -264,7 +288,11 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         response: { workflow: { stages: { dedupe: { status: "running" } } } },
       },
     ];
-    let prepared: JsonObject | undefined;
+    const response = mock((_payload: JsonObject) => {
+      if (failure === "before-post")
+        throw new Error("Synthetic stop before posting");
+      return {};
+    });
     const complete: Step = {
       request: { id, action: "complete", stage: "dedupe", result },
     };
@@ -284,12 +312,7 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
           result,
           pendingWrite: { groups },
         },
-        response(payload) {
-          prepared = payload;
-          if (failure === "before-post")
-            throw new Error("Synthetic stop before posting");
-          return {};
-        },
+        response,
       },
       ...(failure === "lost-completion"
         ? [
@@ -323,6 +346,25 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         },
       },
       complete,
+      ...prefix.slice(0, -1),
+      {
+        request: { id, action: "begin", stage: "dedupe" },
+        response: {
+          workflow: {
+            stages: {
+              dedupe: {
+                status: "completed",
+                result: {
+                  scanId: document.scanId,
+                  uniqueFindingIds: result.uniqueFindingIds,
+                  duplicateGroups: groups,
+                  deduplicationStatus: "completed",
+                },
+              },
+            },
+          },
+        },
+      },
     ]);
     const history = async (args: readonly string[], input?: string) => {
       if (args[0] === "get-scan") {
@@ -377,7 +419,7 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         });
       }
       expect(url.pathname).toBe("/v1/dedupe-groups");
-      expect(prepared).toMatchObject({
+      expect(response.mock.lastCall?.[0]).toMatchObject({
         result,
         pendingWrite: JSON.parse(init.body as string),
       });
@@ -393,6 +435,7 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
       runWorkbench: history,
       reviewer,
       fetch,
+      waitForRetry: async () => {},
     };
     await expect(
       deduplicateScanInternal(document.scanId, options, dependencies),
@@ -400,6 +443,20 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
     expect(
       await deduplicateScanInternal(document.scanId, options, dependencies),
     ).toEqual(result);
+    const cached = await deduplicateScanInternal(document.scanId, options, {
+      ...dependencies,
+      fetch: rejecting("Reading a completed workflow made an HTTP request"),
+    });
+    expect(cached).toEqual(result);
+    const publication = await prepareScanPublication(scanDir, {
+      destination: "linear",
+      teamId: "fixture-team",
+      findingIds: cached.scanRepresentativeFindingIds,
+      environment,
+    });
+    expect(publication.issues.map((issue) => issue.findingId)).toEqual(
+      cached.scanRepresentativeFindingIds,
+    );
     expect(bodies).toHaveLength(
       failure === "before-post"
         ? 1

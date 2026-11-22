@@ -1,8 +1,8 @@
 // Deliberately vulnerable local fixture. Do not deploy this application.
 import { once } from "node:events";
+import { realpathSync } from "node:fs";
 import { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { pathToFileURL } from "node:url";
 
 // These identities, tokens, and records are synthetic demo data.
 const tokens = new Map([
@@ -15,7 +15,9 @@ const invoices = new Map<string, Invoice>([
   ["1002", { id: "1002", owner: "bob", amount: 80 }],
 ]);
 
-export async function createServer(): Promise<Server> {
+export async function createServer({
+  enforceOwnership = false,
+}: { enforceOwnership?: boolean } = {}): Promise<Server> {
   const server = createHttpServer((request, response) => {
     function reply(status: number, body: Invoice | { error: string }): void {
       const encoded = JSON.stringify(body);
@@ -41,7 +43,9 @@ export async function createServer(): Promise<Server> {
       return reply(404, { error: "not found" });
     const invoice = invoices.get(path.slice("/invoices/".length));
     if (invoice === undefined) return reply(404, { error: "not found" });
-    // BUG: authentication does not establish ownership of this invoice.
+    // The default demo path is vulnerable; the repaired control is an explicit test mode.
+    if (enforceOwnership && invoice.owner !== user)
+      return reply(403, { error: "forbidden" });
     reply(200, invoice);
   });
   server.listen(0, "127.0.0.1");
@@ -49,10 +53,19 @@ export async function createServer(): Promise<Server> {
   return server;
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+// Keep the copied demo fixture independent of repository helpers.
+function isMain(): boolean {
+  try {
+    return (
+      process.argv[1] !== undefined &&
+      realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   const server = await createServer();
   console.log(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
 }

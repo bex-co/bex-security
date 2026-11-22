@@ -1,53 +1,101 @@
+"""Exercise read-only validation of sealed bundles, including legacy evidence and unsealed inputs."""
+
 from __future__ import annotations
 
-import importlib.util
-import io
 import json
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import ModuleType
+
+from workbench_test_support import ScanFixtureTestCase, load_script
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE_SCAN = PLUGIN_ROOT / "examples" / "completed-scan"
+EXAMPLE_SCAN = PLUGIN_ROOT / "examples" / "legacy-completed-scan"
 
 
-def load_validator() -> ModuleType:
-    script = PLUGIN_ROOT / "scripts" / "validate_scan_contract.py"
-    spec = importlib.util.spec_from_file_location("validate_scan_contract", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"could not load {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+VALIDATOR = load_script("validate_scan_contract")
 
 
-VALIDATOR = load_validator()
+class ValidateScanContractTest(ScanFixtureTestCase):
+    validator = VALIDATOR
+    example_scan = EXAMPLE_SCAN
 
+    def validate_cli(self, *options: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                str(PLUGIN_ROOT / "scripts" / "validate_scan_contract.py"),
+                "--scan-dir",
+                str(self.scan_dir),
+                *options,
+            ],
+            capture_output=True,
+            text=True,
+        )
 
-class ValidateScanContractTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.scan_dir = Path(self.temp_dir.name) / "scan"
-        shutil.copytree(EXAMPLE_SCAN, self.scan_dir)
-        manifest = json.loads((self.scan_dir / "scan-manifest.json").read_text())
-        findings = json.loads((self.scan_dir / "findings.json").read_text())
-        coverage = json.loads((self.scan_dir / "coverage.json").read_text())
-        report = VALIDATOR.FINALIZER._generate_report_projection(manifest, findings, coverage)
-        (self.scan_dir / "report.md").write_bytes(report)
+    def assert_rejection(self, reason: str, location: str | None = None) -> None:
+        result = self.validate_cli("--json-errors")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        expected = {"status": "invalid", "reason": reason}
+        if location:
+            expected["location"] = location
+        self.assertEqual(json.loads(result.stdout), expected)
+        self.assertIn("scan contract validation failed:", result.stderr)
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+    def test_rejection_receipts_keep_the_existing_cli_streams_and_exit_codes(self) -> None:
+        default = self.validate_cli()
+        structured = self.validate_cli("--json-errors")
+        self.assertEqual(structured.returncode, 0, structured.stderr)
+        self.assertEqual((structured.stdout, structured.stderr), (default.stdout, default.stderr))
 
-    def read_json(self, name: str) -> dict[str, object]:
-        return json.loads((self.scan_dir / name).read_text(encoding="utf-8"))
+        (self.scan_dir / "report.md").unlink()
+        default = self.validate_cli()
+        structured = self.validate_cli("--json-errors")
+        self.assertEqual(default.returncode, 2)
+        self.assertEqual(default.stdout, "")
+        self.assertIn("report.md", default.stderr)
+        self.assertEqual(default.stderr, structured.stderr)
+        self.assert_rejection("missing_artifact", "report.md")
 
-    def write_json(self, name: str, payload: object) -> None:
-        (self.scan_dir / name).write_text(json.dumps(payload, indent=2) + "\n")
+    def test_completion_field_rejections(self) -> None:
+        manifest = self.read_json("scan-manifest.json")
+        del manifest["scan"]["completedAt"]
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("missing_required_field", "manifest.scan.completedAt")
+        manifest["scan"]["completedAt"] = []
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("invalid_required_field", "manifest.scan.completedAt")
+
+    def test_artifact_rejections(self) -> None:
+        path = self.scan_dir / "findings.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+        self.assert_rejection("artifact_digest_mismatch", "findings.json")
+        path.write_text("{")
+        self.assert_rejection("invalid_json", "findings.json")
+        path.unlink()
+        self.assert_rejection("missing_artifact", "findings.json")
+
+        manifest = self.read_json("scan-manifest.json")
+        manifest["scan"]["artifacts"] = [
+            item for item in manifest["scan"]["artifacts"] if item["path"] != "findings.json"
+        ]
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("missing_artifact_record", "findings.json")
+
+    def test_rejection_receipt_omits_custom_paths_and_values(self) -> None:
+        manifest = self.read_json("scan-manifest.json")
+        manifest["scan"]["artifacts"].append(
+            {"path": "artifacts/custom.txt", "sha256": "0" * 64, "mediaType": "text/plain"}
+        )
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("missing_artifact")
+
+        manifest["scan"]["target"]["kind"] = "custom target"
+        self.write_json("scan-manifest.json", manifest)
+        self.assert_rejection("validation_failed")
 
     def test_accepts_sealed_contract_without_mutating_it(self) -> None:
         before = {
@@ -64,17 +112,7 @@ class ValidateScanContractTest(unittest.TestCase):
         findings["findings"][0]["attackPath"] = {
             "dataFlow": {"evidenceRefs": ["legacy-missing-evidence"]}
         }
-        self.write_json("findings.json", findings)
-        manifest = self.read_json("scan-manifest.json")
-        findings_artifact = next(
-            artifact
-            for artifact in manifest["scan"]["artifacts"]
-            if artifact["path"] == "findings.json"
-        )
-        findings_artifact["sha256"] = VALIDATOR.FINALIZER._sha256_file(
-            self.scan_dir / "findings.json"
-        )
-        self.write_json("scan-manifest.json", manifest)
+        self.rewrite_sealed_artifact("findings.json", findings)
 
         validated = VALIDATOR.validate_contract(self.scan_dir)
 
@@ -90,26 +128,14 @@ class ValidateScanContractTest(unittest.TestCase):
         self.assertEqual(len(validated["manifest"]["metadata"]), 16 * 1024 * 1024)
 
     def test_rejects_unsafe_values_in_sealed_finding_extensions(self) -> None:
-        original_manifest = (self.scan_dir / "scan-manifest.json").read_bytes()
-        original_findings = (self.scan_dir / "findings.json").read_bytes()
+        findings = self.read_json("findings.json")
         for value, reason in (
             (1e20, "unsafe integer-valued JSON numbers"),
             ("bad-" + chr(0xD800), "well-formed Unicode"),
         ):
             with self.subTest(reason=reason):
-                (self.scan_dir / "scan-manifest.json").write_bytes(original_manifest)
-                (self.scan_dir / "findings.json").write_bytes(original_findings)
-                findings = self.read_json("findings.json")
                 findings["findings"][0].setdefault("extensions", {})["unsafe"] = value
-                self.write_json("findings.json", findings)
-                manifest = self.read_json("scan-manifest.json")
-                for artifact in manifest["scan"]["artifacts"]:
-                    if artifact["path"] == "findings.json":
-                        artifact["sha256"] = VALIDATOR.FINALIZER._sha256_file(
-                            self.scan_dir / "findings.json"
-                        )
-                        break
-                self.write_json("scan-manifest.json", manifest)
+                self.rewrite_sealed_artifact("findings.json", findings)
 
                 with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, reason):
                     VALIDATOR.validate_contract(self.scan_dir)
@@ -128,22 +154,6 @@ class ValidateScanContractTest(unittest.TestCase):
 
         with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed"):
             VALIDATOR.validate_contract(self.scan_dir)
-
-    def test_cli_prints_machine_readable_receipt(self) -> None:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            exit_code = VALIDATOR.main(["--scan-dir", str(self.scan_dir)])
-
-        receipt = json.loads(stdout.getvalue())
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(receipt["status"], "valid")
-        self.assertEqual(
-            receipt["manifestPath"],
-            str(self.scan_dir.resolve() / "scan-manifest.json"),
-        )
-        self.assertEqual(stderr.getvalue(), "")
 
     def test_finalizer_then_validator_cli_smoke(self) -> None:
         (self.scan_dir / "report.md").unlink()
@@ -166,7 +176,10 @@ class ValidateScanContractTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(validated.returncode, 0, validated.stderr)
-        self.assertEqual(json.loads(validated.stdout)["status"], "valid")
+        receipt = json.loads(validated.stdout)
+        self.assertEqual(receipt["status"], "valid")
+        self.assertEqual(receipt["manifestPath"], str(scan_dir / "scan-manifest.json"))
+        self.assertEqual(validated.stderr, "")
 
 
 if __name__ == "__main__":

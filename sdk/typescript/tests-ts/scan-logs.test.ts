@@ -1,27 +1,22 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { writeJsonLines } from "./support/json.js";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { zstdCompressSync } from "node:zlib";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { readSavedScanLogs, readScanLogs } from "../src/scan-logs.js";
+import {
+  findScanSession,
+  readSavedScanLogs,
+  readScanLogs,
+} from "../src/scan-logs.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const directories: string[] = [];
+const { temporaryDirectory: temporaryHome, cleanup } = createApiTestFixtures(
+  "codex-security-scan-logs-",
+);
 
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(cleanup);
 
 async function writeSession(
   home: string,
@@ -33,39 +28,26 @@ async function writeSession(
 ): Promise<void> {
   const directory = join(home, "sessions", "2026", "08", "11");
   await mkdir(directory, { recursive: true });
-  await writeFile(
-    join(directory, `rollout-${threadId}.jsonl`),
-    [
-      {
-        type: "session_meta",
-        payload: {
-          id: threadId,
-          ...(startedAt === undefined ? {} : { timestamp: startedAt }),
-          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
-          ...(parentThreadId === undefined
-            ? {}
-            : {
-                source: {
-                  subagent: {
-                    thread_spawn: { parent_thread_id: parentThreadId },
-                  },
+  await writeJsonLines(join(directory, `rollout-${threadId}.jsonl`), [
+    {
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        ...(startedAt === undefined ? {} : { timestamp: startedAt }),
+        ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
+        ...(parentThreadId === undefined
+          ? {}
+          : {
+              source: {
+                subagent: {
+                  thread_spawn: { parent_thread_id: parentThreadId },
                 },
-              }),
-        },
+              },
+            }),
       },
-      ...events,
-    ]
-      .map((event) => JSON.stringify(event))
-      .join("\n"),
-  );
-}
-
-async function temporaryHome(): Promise<string> {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-scan-logs-")),
-  );
-  directories.push(directory);
-  return directory;
+    },
+    ...events,
+  ]);
 }
 
 function commandEvent(command: string, id: string, timestamp?: string) {
@@ -81,21 +63,34 @@ function commandEvent(command: string, id: string, timestamp?: string) {
   };
 }
 
+function taskStarted(turnId: string, timestamp?: string) {
+  return {
+    type: "event_msg",
+    ...(timestamp === undefined ? {} : { timestamp }),
+    payload: { type: "task_started", turn_id: turnId },
+  };
+}
+
 describe("saved scan logs", () => {
   test.each([
-    ["prefix first", [0], [0, 1, 1, 2], 1, false],
-    ["complete first", [0, 1, 1, 2], [0], 0, false],
-    ["identical copies", [0, 1, 1, 2], [0, 1, 1, 2], 0, false],
-    ["longer divergent copy", [0, 2], [0, 1, 1, 2], 0, false],
-    ["shorter divergent copy", [0, 1, 1, 2], [0, 2], 0, false],
-    ["equal-length divergent copy", [0, 1], [0, 2], 0, false],
-    ["complete archived copy", [0], [0, 1, 1, 2], 1, true],
-    ["prefix archived copy", [0, 1, 1, 2], [0], 0, true],
-    ["identical archived copy", [0, 1, 1, 2], [0, 1, 1, 2], 0, true],
-    ["divergent archived copy", [0, 2], [0, 1, 1, 2], 0, true],
+    ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
+    ["complete first", [0, 1, 1, 2], [0], 0, false, false],
+    ["identical copies", [0, 1, 1, 2], [0, 1, 1, 2], 0, false, false],
+    ["longer divergent copy", [0, 2], [0, 1, 1, 2], 0, false, false],
+    ["shorter divergent copy", [0, 1, 1, 2], [0, 2], 0, false, false],
+    ["equal-length divergent copy", [0, 1], [0, 2], 0, false, false],
+    ["complete archived copy", [0], [0, 1, 1, 2], 1, true, false],
+    ["prefix archived copy", [0, 1, 1, 2], [0], 0, true, false],
+    ["identical archived copy", [0, 1, 1, 2], [0, 1, 1, 2], 0, true, false],
+    ["divergent archived copy", [0, 2], [0, 1, 1, 2], 0, true, false],
+    ["complete compressed copy", [0], [0, 1, 1, 2], 1, false, true],
+    ["prefix compressed copy", [0, 1, 1, 2], [0], 0, false, true],
+    ["identical compressed copy", [0, 1, 1, 2], [0, 1, 1, 2], 0, false, true],
+    ["divergent compressed copy", [0, 2], [0, 1, 1, 2], 0, false, true],
+    ["complete compressed archived copy", [0], [0, 1, 1, 2], 1, true, true],
   ] as const)(
     "retains complete copied rollout events and precedence: %s",
-    async (_label, first, second, selected, archived) => {
+    async (_label, first, second, selected, archived, compressed) => {
       const homes = [await temporaryHome(), await temporaryHome()];
       const activity = [
         commandEvent("first", "first-call", "2026-08-11T12:00:03Z"),
@@ -111,6 +106,18 @@ describe("saved scan logs", () => {
           copies[index]!.map((event) => activity[event]!),
           "parent",
         );
+      }
+      if (compressed) {
+        const path = join(
+          homes[1]!,
+          "sessions",
+          "2026",
+          "08",
+          "11",
+          "rollout-worker.jsonl",
+        );
+        await writeFile(`${path}.zst`, zstdCompressSync(await readFile(path)));
+        unlinkSync(path);
       }
       if (archived) {
         await rename(
@@ -137,7 +144,7 @@ describe("saved scan logs", () => {
           "2026",
           "08",
           "11",
-          "rollout-worker.jsonl",
+          `rollout-worker.jsonl${compressed && selected === 1 ? ".zst" : ""}`,
         ),
       );
       expect(
@@ -166,6 +173,91 @@ describe("saved scan logs", () => {
     );
     expect(result.sessions.map(({ threadId }) => threadId)).toEqual(["parent"]);
   });
+
+  test.each([
+    "original",
+    "legacy archive",
+    "short archive",
+    "unrelated short archive",
+  ])(
+    "collects parentless comparisons inside a shared Desktop scan window (%s)",
+    async (layout) => {
+      const home = await temporaryHome();
+      const scanDir = join(home, "scan");
+      const cwd = join(scanDir, "artifacts", "deep_discovery");
+      await writeSession(home, "owner", [], undefined, "2026-08-01T00:00:00Z");
+      await writeSession(home, "other-task", [], "owner");
+      await writeSession(
+        home,
+        "worker",
+        [],
+        undefined,
+        "2026-08-02T00:30:00Z",
+        join(cwd, "workers", "discovery-0001", "output"),
+      );
+      await writeSession(
+        home,
+        "replacement-comparison",
+        [],
+        undefined,
+        "2026-08-02T02:00:00Z",
+        cwd,
+      );
+      await writeSession(
+        home,
+        "older-comparison",
+        [],
+        undefined,
+        "2026-08-01T01:00:00Z",
+        cwd,
+      );
+      await writeSession(
+        home,
+        "comparison",
+        [],
+        undefined,
+        "2026-08-02T01:00:00Z",
+        cwd,
+      );
+      await writeSession(
+        home,
+        "unbound-sibling",
+        [],
+        undefined,
+        "2026-08-02T01:00:00Z",
+        join(home, "scan-other", "artifacts"),
+      );
+      const digest = createHash("sha256")
+        .update(layout === "unrelated short archive" ? "scan-other" : "scan")
+        .digest("hex");
+      const directory =
+        layout === "original"
+          ? scanDir
+          : layout === "legacy archive"
+            ? scanDir + ".previous-test"
+            : join(home, `.previous-${digest}-test`);
+      const result = await readSavedScanLogs(
+        {
+          scanId: "scan-1",
+          scanDir: directory,
+          mode: "deep",
+          continuationThreadId: "owner",
+          lifecycle: {
+            startedAt: "2026-08-02T00:00:00Z",
+            finishedAt: "2026-08-02T02:00:00Z",
+          },
+          progress: { status: "complete", updatedAt: "2026-08-03T00:00:00Z" },
+          executionThreadIds: ["worker"],
+        },
+        home,
+      );
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+        layout === "unrelated short archive"
+          ? ["owner", "worker"]
+          : ["comparison", "owner", "worker"],
+      );
+    },
+  );
 
   test("collects known desktop and CLI threads across active and archived homes without duplicates", async () => {
     const desktop = await temporaryHome();
@@ -257,6 +349,91 @@ describe("saved scan logs", () => {
           "No saved session logs are available for scan scan-1.",
         );
       }
+    },
+  );
+
+  const justBeforeCompletion = "2026-08-11T12:03:00.123Z";
+  const preciseCompletion = "2026-08-11T12:03:00.123789Z";
+  test.each([
+    ["complete", preciseCompletion],
+    ["failed", preciseCompletion],
+    ["canceled", preciseCompletion],
+    ["complete", null],
+    ["complete", undefined],
+  ] as const)(
+    "preserves resumed workers with status %s and log boundary %p",
+    async (status, logCompletedAt) => {
+      const home = await temporaryHome();
+      const scanDirectory = join(home, "scans", "resumed");
+      const artifacts = join(scanDirectory, "artifacts");
+      const afterCompletion = "2026-08-11T12:04:00.000Z";
+      const resumed = [
+        taskStarted("resume-turn", "2026-08-11T12:02:00.000Z"),
+        commandEvent("resumed scan work", "resume-call"),
+      ];
+      const followup = [
+        taskStarted("followup-turn", afterCompletion),
+        commandEvent("post-scan followup", "post-call"),
+      ];
+      await writeSession(
+        home,
+        "parent",
+        [...resumed, ...followup],
+        undefined,
+        "2026-08-11T12:00:00.000Z",
+        scanDirectory,
+      );
+      for (const [threadId, startedAt, directory] of [
+        ["recorded-worker", afterCompletion, artifacts],
+        ["resumed-worker", justBeforeCompletion, artifacts],
+        ["followup-worker", afterCompletion, artifacts],
+        [
+          "unrelated-worker",
+          justBeforeCompletion,
+          join(home, "other-scan", "artifacts"),
+        ],
+      ] as const) {
+        await writeSession(home, threadId, [], undefined, startedAt, directory);
+      }
+
+      await writeSession(
+        home,
+        "followup-child",
+        [commandEvent("post-scan child work", "child-call")],
+        "parent",
+        afterCompletion,
+      );
+
+      const result = await readSavedScanLogs(
+        {
+          scanId: "resumed-scan",
+          mode: "deep",
+          scanDir: scanDirectory,
+          continuationThreadId: "parent",
+          executionThreadIds: ["parent", "recorded-worker"],
+          progress: {
+            status,
+            updatedAt: "2026-08-11T12:01:00.000Z",
+          },
+          updatedAt: "2026-08-11T12:05:00.000Z",
+          ...(logCompletedAt === undefined ? {} : { logCompletedAt }),
+        },
+        home,
+      );
+
+      const expected =
+        logCompletedAt == null ? [...resumed, ...followup] : resumed;
+      expect(
+        result.events.filter(({ threadId }) => threadId === "parent").slice(1),
+      ).toEqual(expected.map((event) => ({ threadId: "parent", event })));
+      expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+        logCompletedAt == null
+          ? ["followup-child", "parent", "recorded-worker"]
+          : ["parent", "recorded-worker", "resumed-worker"],
+      );
+      expect(
+        result.events.some(({ threadId }) => threadId === "followup-child"),
+      ).toBe(logCompletedAt == null);
     },
   );
 
@@ -388,6 +565,96 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(result)).toContain("SYNTHETIC_KEY");
     expect(JSON.stringify(result)).toContain("private command output");
     expect(JSON.stringify(result)).not.toContain("private unrelated scan");
+  });
+
+  test("reads compressed sessions with metadata split across frames", async () => {
+    const home = await temporaryHome();
+    await writeSession(
+      home,
+      "parent",
+      [commandEvent("parent work", "parent-call")],
+      undefined,
+      undefined,
+      "/scan",
+    );
+    await writeSession(
+      home,
+      "worker",
+      [commandEvent("worker work", "worker-call")],
+      "parent",
+    );
+    const directory = join(home, "sessions", "2026", "08", "11");
+    for (const threadId of ["parent", "worker"]) {
+      const path = join(directory, `rollout-${threadId}.jsonl`);
+      const contents = await readFile(path);
+      await writeFile(
+        `${path}.zst`,
+        Buffer.concat([
+          zstdCompressSync(contents.subarray(0, 1)),
+          zstdCompressSync(contents.subarray(1)),
+        ]),
+      );
+      unlinkSync(path);
+    }
+
+    expect(await findScanSession(home, "parent")).toMatchObject({
+      workingDirectory: "/scan",
+      path: join(directory, "rollout-parent.jsonl.zst"),
+    });
+    const result = await readScanLogs({
+      scanId: "scan-1",
+      threadId: "parent",
+      codexHome: home,
+    });
+    expect(result.events).toEqual([
+      expect.objectContaining({ threadId: "parent" }),
+      {
+        threadId: "parent",
+        event: commandEvent("parent work", "parent-call"),
+      },
+      expect.objectContaining({ threadId: "worker" }),
+      {
+        threadId: "worker",
+        event: commandEvent("worker work", "worker-call"),
+      },
+    ]);
+  });
+
+  test("treats a lone carriage return as a compressed metadata line boundary", async () => {
+    const home = await temporaryHome();
+    const directory = join(home, "sessions");
+    await mkdir(directory);
+    const contents =
+      '{"type":"session_meta",\r"payload":{"id":"wrong"}}\n' +
+      '{"type":"session_meta","payload":{"id":"actual"}}\n';
+    await writeFile(
+      join(directory, "rollout.jsonl.zst"),
+      zstdCompressSync(Buffer.from(contents)),
+    );
+
+    expect(await findScanSession(home, "wrong")).toBeNull();
+    expect(await findScanSession(home, "actual")).toMatchObject({
+      threadId: "actual",
+    });
+  });
+
+  test("rejects a truncated final frame in a selected rollout", async () => {
+    const home = await temporaryHome();
+    const directory = join(home, "sessions");
+    await mkdir(directory);
+    const header = '{"type":"session_meta","payload":{"id":"parent"}}\n';
+    const event = JSON.stringify(commandEvent("parent work", "parent-call"));
+    const tail = zstdCompressSync(Buffer.from(event + "\n"));
+    await writeFile(
+      join(directory, "rollout-parent.jsonl.zst"),
+      Buffer.concat([
+        zstdCompressSync(Buffer.from(header)),
+        tail.subarray(0, tail.length - 1),
+      ]),
+    );
+    await expect(
+      readScanLogs({ scanId: "scan-1", threadId: "parent", codexHome: home }),
+    ).rejects.toThrow();
   });
 
   test("excludes inherited parent history from worker logs", async () => {
@@ -588,6 +855,27 @@ describe("saved scan logs", () => {
     ]);
     expect(JSON.stringify(archivedLogs)).toContain("review archived scan");
     expect(JSON.stringify(archivedLogs)).not.toContain("PRIVATE REPLACEMENT");
+    const digest = createHash("sha256").update("results").digest("hex");
+    const shortArchive = join(home, "scans", `.previous-${digest}-a1b2c3d4`);
+    expect(
+      await readScanLogs({ ...options, scanDirectory: shortArchive }),
+    ).toEqual(archivedLogs);
+
+    for (const logCompletedAt of [null, undefined]) {
+      const legacyLogs = await readSavedScanLogs(
+        {
+          scanId: "archived-scan",
+          mode: "deep",
+          scanDir: archived,
+          continuationThreadId: "archived-parent",
+          executionThreadIds: ["archived-parent"],
+          progress: { status: "complete", updatedAt: completedAt },
+          ...(logCompletedAt === undefined ? {} : { logCompletedAt }),
+        },
+        home,
+      );
+      expect(legacyLogs).toEqual(archivedLogs);
+    }
 
     const unrelatedRoot = await readScanLogs({
       ...options,
@@ -610,6 +898,84 @@ describe("saved scan logs", () => {
       ["archived-parent", "archived-worker", "replacement-worker"],
     );
   });
+
+  const scanCompletion = "2026-08-11T12:02:00.000Z";
+  const followupStart = "2026-08-11T12:03:00.000Z";
+  test.each([
+    ["without a follow-up", scanCompletion, null, false],
+    ["with a follow-up", scanCompletion, followupStart, true],
+    ["with a follow-up at completion", followupStart, followupStart, true],
+    [
+      "with a turn just before completion",
+      preciseCompletion,
+      justBeforeCompletion,
+      false,
+    ],
+    ["while running", null, followupStart, false],
+    ["without completion", undefined, followupStart, false],
+    ["with invalid completion", "invalid", followupStart, false],
+    ["without a turn timestamp", scanCompletion, undefined, false],
+    ["with an invalid turn timestamp", scanCompletion, "invalid", false],
+  ] as const)(
+    "preserves the finishing scan turn %s",
+    async (_label, completedAt, followupAt, excludeFollowup) => {
+      const home = await temporaryHome();
+      const scanEvents = [
+        taskStarted("scan-turn", "2026-08-11T12:00:00.000Z"),
+        {
+          timestamp: "2026-08-11T12:01:59.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "mcp__codex_security__complete_codex_security_scan",
+            call_id: "completion-call",
+            arguments: "{}",
+          },
+        },
+        {
+          timestamp: "2026-08-11T12:02:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "completion-call",
+            output: "Scan completed.",
+          },
+        },
+        {
+          timestamp: "2026-08-11T12:02:02.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "Scan report is ready." },
+        },
+        {
+          timestamp: "2026-08-11T12:02:03.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "scan-turn" },
+        },
+      ];
+      const followup =
+        followupAt === null
+          ? []
+          : [
+              taskStarted("followup-turn", followupAt),
+              commandEvent("post-scan followup", "post-call"),
+            ];
+      await writeSession(home, "parent", [...scanEvents, ...followup]);
+
+      const result = await readScanLogs({
+        scanId: "scan-555",
+        threadId: "parent",
+        codexHome: home,
+        logCompletedAt: completedAt,
+      });
+
+      const expected = excludeFollowup
+        ? scanEvents
+        : [...scanEvents, ...followup];
+      expect(result.events.slice(1)).toEqual(
+        expected.map((event) => ({ threadId: "parent", event })),
+      );
+    },
+  );
 
   test.each([false, true])(
     "does not parse event bodies from unrelated saved sessions (copied: %p)",

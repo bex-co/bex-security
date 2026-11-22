@@ -1,3 +1,4 @@
+import { writeJsonLines } from "./support/json.js";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,16 +8,20 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Cli, Formatter, z } from "incur";
+import { estimateTokenCount, sliceByTokens } from "tokenx";
 import { main } from "../src/cli.js";
 import { scanLogsJson } from "../src/cli-scan-logs-json.js";
 import { readSavedScanLogs } from "../src/scan-logs.js";
 import { VERSION } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { throwing } from "./support/errors.js";
+import { createCliTest } from "./support/cli-run.js";
 
-async function fixture() {
+async function fixture(desktop = false, archived = false, continuation = true) {
   const state = await realpath(await mkdtemp(join(tmpdir(), "saved-logs-")));
-  const home = join(state, "codex-home");
-  await mkdir(join(home, "sessions"), { recursive: true });
+  const home = join(state, desktop ? "desktop-home" : "codex-home");
+  const sessions = join(home, archived ? "archived_sessions" : "sessions");
+  await mkdir(sessions, { recursive: true });
   const events = [
     { type: "session_meta", payload: { id: "thread-1" } },
     {
@@ -27,20 +32,22 @@ async function fixture() {
       },
     },
   ];
-  await writeFile(
-    join(home, "sessions", "rollout.jsonl"),
-    events.map((event) => JSON.stringify(event)).join("\n"),
-  );
-  const scan = { scanId: "scan-1", continuationThreadId: "thread-1" };
-  const logs = await readSavedScanLogs(scan, home);
+  await writeJsonLines(join(sessions, "rollout.jsonl"), events);
+  const scan = {
+    scanId: "scan-1",
+    ...(continuation ? { continuationThreadId: "thread-1" } : {}),
+    threadIds: ["thread-1"],
+  };
+  const logs = await readSavedScanLogs(scan, home, { allowMissingRoot: true });
   const deps = dependencies({
-    environment: { CODEX_SECURITY_STATE_DIR: state },
+    environment: {
+      CODEX_SECURITY_STATE_DIR: state,
+      CODEX_HOME: home,
+    },
     onWorkbench: () => ({ scan }),
   });
-  deps.createSecurity = () => {
-    throw new Error("Reading logs must not start Codex");
-  };
-  return { state, logs, deps };
+  deps.createSecurity = throwing("Reading logs must not start Codex");
+  return { state, home, sessions, logs, deps };
 }
 
 async function referenceOutput(args: string[], logs: unknown) {
@@ -82,6 +89,45 @@ describe("saved logs JSON output", () => {
     await rm(dataHome, { recursive: true, force: true });
   });
 
+  test.each([
+    [false, true],
+    [true, true],
+    [false, false],
+    [true, false],
+  ])(
+    "reads Desktop logs archived=%p continuation=%p",
+    async (archived, continuation) => {
+      const f = await fixture(true, archived, continuation);
+      try {
+        await writeJsonLines(join(f.sessions, "unrelated.jsonl"), [
+          {
+            type: "session_meta",
+            payload: {
+              id: "unrelated",
+              source: {
+                subagent: { thread_spawn: { parent_thread_id: "thread-1" } },
+              },
+            },
+          },
+        ]);
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(["scans", "logs", "scan-1", "--json"], f.deps),
+        ).toBe(0);
+        expect(JSON.parse(stdout.text())).toEqual(f.logs);
+        expect(stderr.text()).toBe("");
+        await rm(f.sessions, { recursive: true });
+        const absent = createCliTest(main);
+        expect(await absent.runCli(["scans", "logs", "scan-1"], f.deps)).toBe(
+          2,
+        );
+        expect(absent.stderr.text()).toContain("No saved session logs");
+      } finally {
+        await rm(f.state, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("preserves the stale installed-skills CTA after saved logs", async () => {
     const f = await fixture();
     try {
@@ -105,16 +151,11 @@ describe("saved logs JSON output", () => {
         ["--format", "json"],
         ["--format=json"],
       ]) {
-        const stdout = capture();
-        const stderr = capture();
-        expect(
-          await main(
-            ["scans", "logs", "scan-1", ...args],
-            stdout.stream,
-            stderr.stream,
-            f.deps,
-          ),
-        ).toBe(0);
+        const { stdout, stderr, runCli } = createCliTest(main);
+
+        expect(await runCli(["scans", "logs", "scan-1", ...args], f.deps)).toBe(
+          0,
+        );
         const expected = await referenceOutput(["--json"], f.logs);
         expect(Object.keys(JSON.parse(expected))).toEqual([
           "scanId",
@@ -147,47 +188,85 @@ describe("saved logs JSON output", () => {
       ["--json", "--filter-output", "events[0,1]"],
       ["--json", "--filter-output", "missing"],
       ["--json", "--filter-output", "scanId,threadId"],
-      ["--json", "--token-count"],
-      ["--json", "--token-limit", "4"],
-      ["--json", "--token-offset", "1", "--token-limit", "4"],
-      ["--json", "--token-offset", "999999"],
       ["--json", "--token-limit", "999999"],
       ["--json", "--full-output"],
       ["--json", "--full-output", "--filter-output", "scanId"],
-      ["--json", "--full-output", "--token-limit", "4"],
-      ["--json", "--full-output", "--token-count"],
     ].map((args) => [args]),
   )("preserves Incur output for %j", async (args) => {
     const f = await fixture();
     try {
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(
-          ["scans", "logs", "scan-1", ...args],
-          stdout.stream,
-          stderr.stream,
-          f.deps,
-        ),
-      ).toBe(0);
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(await runCli(["scans", "logs", "scan-1", ...args], f.deps)).toBe(
+        0,
+      );
       const expected = await referenceOutput(
         args.flatMap((arg) =>
           arg === "--format=json" ? ["--format", "json"] : [arg],
         ),
         f.logs,
       );
-      if (args.includes("--full-output") && !args.includes("--token-count")) {
+      if (args.includes("--full-output")) {
         expect(withoutDuration(stdout.text())).toEqual(
           withoutDuration(expected),
         );
       } else {
         expect(stdout.text()).toBe(expected);
       }
-      expect(stderr.text()).toBe("");
+      if (args.length === 0) {
+        expect(stderr.text()).toContain("scans show scan-1");
+        expect(stderr.text()).toContain("scans logs scan-1");
+      } else {
+        expect(stderr.text()).toBe("");
+      }
     } finally {
       await rm(f.state, { recursive: true, force: true });
     }
   });
+
+  test.each([false, true])(
+    "counts and pages JSON logs with full output %p",
+    async (fullOutput) => {
+      const f = await fixture();
+      try {
+        const args = ["scans", "logs", "scan-1", "--json"];
+        if (fullOutput) args.push("--full-output");
+        const text = Formatter.format(f.logs, "json");
+        const total = estimateTokenCount(text);
+        async function run(...flags: string[]) {
+          const { stdout, stderr, runCli } = createCliTest(main);
+          expect(await runCli([...args, ...flags], f.deps)).toBe(0);
+          expect(stderr.text()).toBe("");
+          return JSON.parse(stdout.text());
+        }
+
+        expect(await run("--token-count")).toBe(total);
+        for (const [flags, start, end] of [
+          [["--token-limit", "4"], 0, 4],
+          [["--token-offset", "1", "--token-limit", "4"], 1, 5],
+          [["--token-offset", String(total + 1)], total, total],
+        ] as const) {
+          const page = `${sliceByTokens(text, start, end)}\n[truncated: showing tokens ${start}–${end} of ${total}]`;
+          const actual = await run(...flags);
+          if (fullOutput) {
+            expect(actual).toEqual({
+              ok: true,
+              data: page,
+              meta: {
+                command: "scans logs",
+                duration: expect.any(String),
+                ...(end < total && { nextOffset: end }),
+              },
+            });
+          } else {
+            expect(actual).toBe(page);
+          }
+        }
+      } finally {
+        await rm(f.state, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.each(
     [
@@ -198,15 +277,10 @@ describe("saved logs JSON output", () => {
       ["--json", "--filter-output"],
     ].map((args) => [args]),
   )("preserves invalid-option failure for %j", async (args) => {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
+
     expect(
-      await main(
-        ["scans", "logs", "scan-1", ...args],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
+      await runCli(["scans", "logs", "scan-1", ...args], dependencies()),
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).not.toBe("");

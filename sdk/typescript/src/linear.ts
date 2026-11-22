@@ -1,3 +1,5 @@
+import { parseJson } from "./value.js";
+import type { webcrypto } from "node:crypto";
 import {
   AuthenticationLinearError,
   ForbiddenLinearError,
@@ -6,6 +8,16 @@ import {
 } from "@linear/sdk";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
+
+// Linear's DPoP declarations use these global types even for Node-only clients.
+type NodeOnlyWebCrypto<T> = typeof globalThis extends { onmessage: unknown }
+  ? {}
+  : T;
+
+declare global {
+  interface JsonWebKey extends NodeOnlyWebCrypto<webcrypto.JsonWebKey> {}
+  interface CryptoKeyPair extends NodeOnlyWebCrypto<webcrypto.CryptoKeyPair> {}
+}
 
 export type LinearClientFactory<
   Method extends keyof LinearClient = "issue" | "projects",
@@ -151,12 +163,7 @@ export async function importLinearIssues(options: {
 
 function linearIssueFilter(input: string | undefined): JsonObject {
   if (input === undefined) return {};
-  let filter: unknown;
-  try {
-    filter = JSON.parse(input);
-  } catch {
-    filter = null;
-  }
+  const filter = parseJson(() => input);
   if (typeof filter === "object" && filter !== null && !Array.isArray(filter)) {
     return filter as JsonObject;
   }

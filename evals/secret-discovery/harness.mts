@@ -1,0 +1,396 @@
+import type { ThreadOptions } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
+import { createHash } from "node:crypto";
+import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { createFixture, writeFixture } from "./fixtures.mts";
+import { gradeResult } from "./grade.mts";
+import {
+  DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
+  bundledCodexSdkEnvironment,
+  deepScanPermissionProfileFallbackError,
+  executablePathForSpawn,
+  inlineToml,
+  preflightDeepScanWorkerPermissionProfile,
+} from "./runtime.mts";
+
+export type PreparedEval = Awaited<ReturnType<typeof prepareEval>>;
+export interface EvalSettings {
+  codexPathOverride: string;
+  env: Record<string, string>;
+  configOverrides: string[];
+  apiKey?: string;
+}
+interface EvalEvent {
+  type: string;
+  message?: string;
+  item?: { type: string; text?: string; message?: string };
+  usage?: unknown;
+  error?: { message: string };
+}
+export interface EvalCodex {
+  startThread(settings: ThreadOptions): {
+    runStreamed(
+      prompt: string,
+      options: { outputSchema: unknown; signal: AbortSignal },
+    ): Promise<{ events: AsyncIterable<EvalEvent> }>;
+  };
+}
+
+const pluginRoot = join(import.meta.dirname, "../../plugins/codex-security/");
+const text = { type: "string" };
+const array = (items: unknown) => ({ type: "array", items });
+const object = (properties: Record<string, unknown>) => ({
+  type: "object",
+  properties,
+  required: Object.keys(properties),
+  additionalProperties: false,
+});
+const summary = object({ summary: text });
+const location = object({
+  path: text,
+  startLine: { type: "integer" },
+  endLine: { type: ["integer", "null"] },
+  role: text,
+});
+
+// A compact projection of the production semantic draft, with no case labels.
+export const outputSchema = object({
+  threatModel: object({
+    summary: text,
+    assets: array(text),
+    trustBoundaries: array(text),
+    attackerCapabilities: array(text),
+    securityObjectives: array(text),
+    assumptions: array(text),
+  }),
+  findings: array(
+    object({
+      ruleId: text,
+      title: text,
+      summary: text,
+      taxonomy: object({ category: text, cwe: array(text) }),
+      severity: object({
+        level: { enum: ["critical", "high", "medium", "low"] },
+        rationale: text,
+      }),
+      confidence: object({
+        level: { enum: ["high", "medium", "low"] },
+        rationale: text,
+      }),
+      locations: array(location),
+      rootCause: summary,
+      validation: summary,
+      attackPath: object({ dataflow: summary, reachability: summary }),
+      codeEvidence: array(
+        object({
+          id: text,
+          label: text,
+          path: text,
+          startLine: { type: "integer" },
+          code: text,
+          explanation: text,
+        }),
+      ),
+      remediation: text,
+    }),
+  ),
+  reviewState: object({
+    surfaces: array(
+      object({
+        label: text,
+        disposition: {
+          enum: [
+            "reported",
+            "no_issue_found",
+            "rejected",
+            "not_applicable",
+            "needs_follow_up",
+          ],
+        },
+        notes: text,
+      }),
+    ),
+    explicitExclusions: array(object({ pattern: text, reason: text })),
+    deferred: array(object({ reason: text, paths: array(text) })),
+    openQuestions: array(text),
+  }),
+});
+
+export async function prepareEval(
+  root: string,
+  { corePromptPath = join(pluginRoot, "references/core-scan.md") } = {},
+) {
+  const repo = join(root, "repository");
+  const runtime = join(root, "runtime");
+  const fixture = createFixture();
+  await writeFixture(repo, fixture);
+  const policyFiles = (
+    await readdir(repo, { recursive: true, withFileTypes: true })
+  )
+    .filter((entry) => entry.isFile() && entry.name === "SECURITY.md")
+    .map((entry) =>
+      relative(repo, join(entry.parentPath, entry.name)).split(sep).join("/"),
+    )
+    .sort();
+  await mkdir(join(runtime, "references"), { recursive: true });
+  const core = await readFile(corePromptPath, "utf8");
+  await writeFile(join(runtime, "references/core-scan.md"), core);
+  const referenceSha256: Record<string, string> = {};
+  const referenceDir = dirname(corePromptPath);
+  const siblings = new Set(await readdir(referenceDir));
+  const auditBriefs = [
+    "baseline-auditor.md",
+    "focused-investigator.md",
+    "validate-scan-findings.md",
+  ].filter((name) => core.includes(name));
+  for (const name of [
+    ...auditBriefs,
+    "default-severity-rubric.md",
+    "threat-model.md",
+    "finding-detail-fields.md",
+    "final-report.md",
+  ]) {
+    const directory =
+      auditBriefs.includes(name) && siblings.has(name)
+        ? referenceDir
+        : join(pluginRoot, "references");
+    const contents = await readFile(join(directory, name));
+    await writeFile(join(runtime, "references", name), contents);
+    referenceSha256[name] = createHash("sha256").update(contents).digest("hex");
+  }
+  for (const name of ["schemas", "examples/completed-scan"]) {
+    await cp(join(pluginRoot, name), join(runtime, name), { recursive: true });
+  }
+  const prompt = [
+    "Perform a static security review of the repository below.",
+    `Repository and authorized scope: ${repo}, all current files.`,
+    `Plugin reference directory: ${runtime}. Bare reference filenames are relative to ${join(runtime, "references")}.`,
+    `For this generated read-only fixture, the caller handles policy discovery. It checked the root and every nested directory. Apply inherited policy using this complete list of repository-relative SECURITY.md files: ${JSON.stringify(policyFiles)}. The fixture has no plugin helper.`,
+    "User security context: none. Supplied threat model: none. Knowledge base: none.",
+    "Subagent allowance: 0. Perform the core workflow sequentially, including its baseline audit and final validation.",
+    "This caller has no scan tools. Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",
+    "Follow the production core workflow below. Inspect source with offline read-only tools; do not execute application code or contact services.",
+    core,
+  ].join("\n\n");
+  return {
+    repo,
+    runtime,
+    fixture,
+    prompt,
+    promptSha256: createHash("sha256").update(core).digest("hex"),
+    referenceSha256,
+  };
+}
+
+export function threadSettings(
+  prepared: Pick<PreparedEval, "repo" | "runtime">,
+  model?: string,
+): ThreadOptions {
+  return {
+    ...(model ? { model } : {}),
+    workingDirectory: prepared.repo,
+    additionalDirectories: [prepared.runtime],
+    skipGitRepoCheck: true,
+    approvalPolicy: "never",
+    modelReasoningEffort: "xhigh",
+    webSearchMode: "disabled",
+    // Do not set sandboxMode: --sandbox overrides the restricted named profile.
+  };
+}
+
+export function codexSettings(
+  home: string,
+  codexPath: string,
+  environment = process.env,
+): EvalSettings {
+  // Keep unrelated service credentials out of the eval process entirely.
+  const inherited = new Set([
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "PATHEXT",
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+  ]);
+  return {
+    codexPathOverride: executablePathForSpawn(codexPath),
+    env: bundledCodexSdkEnvironment(codexPath, {
+      ...Object.fromEntries(
+        Object.entries(environment).filter(
+          ([name, value]) =>
+            value !== undefined && inherited.has(name.toUpperCase()),
+        ),
+      ),
+      CODEX_HOME: home,
+      CODEX_SQLITE_HOME: home,
+      CODEX_CLI_PATH: codexPath,
+    }),
+    // Raw TOML preserves literal filesystem keys that SDK object flattening loses.
+    // Everything outside the source, references, and minimal runtime is unreadable.
+    configOverrides: [
+      `default_permissions=${inlineToml(DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID)}`,
+      "allow_login_shell=false",
+      'shell_environment_policy.inherit="core"',
+      "shell_environment_policy.ignore_default_excludes=false",
+      "features.memories=false",
+      "features.apps=false",
+      "features.plugins=false",
+      "features.multi_agent=false",
+      "features.shell_snapshot=false",
+      'approval_policy="never"',
+      'model_reasoning_effort="xhigh"',
+      'web_search="disabled"',
+      'windows.sandbox="elevated"',
+      `permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}=${inlineToml(permissionProfile(home, codexPath))}`,
+    ],
+  };
+}
+
+function permissionProfile(home: string, codexPath: string) {
+  return {
+    filesystem: {
+      ":minimal": "read",
+      ":workspace_roots": "read",
+      [dirname(dirname(codexPath))]: { ".": "read" },
+      [resolve(home)]: { ".": "deny" },
+    },
+    network: { enabled: false },
+  };
+}
+
+export async function preflightEval(
+  prepared: Pick<PreparedEval, "repo">,
+  settings: EvalSettings,
+  signal?: AbortSignal,
+) {
+  const openAiApiKey = environmentEntry(settings.env, "OPENAI_API_KEY")?.trim();
+  const codexApiKey = environmentEntry(settings.env, "CODEX_API_KEY")?.trim();
+  const { useOpenAiApiKey } = await preflightDeepScanWorkerPermissionProfile({
+    codexPath: settings.codexPathOverride,
+    cwd: prepared.repo,
+    configOverrides: settings.configOverrides,
+    env: settings.env,
+    allowOpenAiApiKeyFallback: Boolean(openAiApiKey && !codexApiKey),
+    expectedProfile: permissionProfile(
+      settings.env.CODEX_HOME,
+      settings.env.CODEX_CLI_PATH,
+    ),
+    signal,
+  });
+  return {
+    ...settings,
+    // Native exec reads CODEX_API_KEY; preserve native accounts before mapping the fallback.
+    ...(useOpenAiApiKey ? { apiKey: openAiApiKey } : {}),
+  };
+}
+
+function environmentEntry(environment: NodeJS.ProcessEnv, requested: string) {
+  const exact = environment[requested];
+  if (exact !== undefined || process.platform !== "win32") return exact;
+  // Plain snapshots need the same case-insensitive lookup as Windows process.env.
+  return Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === requested,
+  )?.[1];
+}
+
+export async function runStructuredTurn(
+  prepared: Pick<PreparedEval, "repo" | "runtime">,
+  codex: EvalCodex,
+  prompt: string,
+  schema: unknown,
+  { model, signal }: { model?: string; signal?: AbortSignal } = {},
+) {
+  const thread = codex.startThread(threadSettings(prepared, model));
+  const controller = new AbortController();
+  const combinedSignal = signal
+    ? AbortSignal.any([signal, controller.signal])
+    : controller.signal;
+  const { events } = await thread.runStreamed(prompt, {
+    outputSchema: schema,
+    signal: combinedSignal,
+  });
+  let finalResponse = "";
+  let usage;
+  let completed = false;
+  let failure;
+  let streamError;
+  try {
+    for await (const event of events) {
+      const warning =
+        event.type === "error"
+          ? event.message
+          : event.type === "item.completed" && event.item!.type === "error"
+            ? event.item!.message
+            : undefined;
+      const fallback = deepScanPermissionProfileFallbackError(warning);
+      if (fallback && !failure) {
+        failure = fallback;
+        controller.abort(fallback);
+      }
+      // Drain the aborted SDK stream so its child exits before state cleanup.
+      if (failure) continue;
+      if (
+        event.type === "item.completed" &&
+        event.item!.type === "agent_message"
+      ) {
+        finalResponse = event.item!.text!;
+      } else if (event.type === "turn.completed") {
+        completed = true;
+        usage = event.usage;
+      } else if (event.type === "turn.failed") {
+        failure = new Error(event.error!.message);
+      } else if (event.type === "error") {
+        // Transport retries also emit errors. Retain the diagnostic if the turn never completes.
+        streamError = new Error(event.message);
+      }
+    }
+  } catch (error) {
+    throw failure ?? error;
+  }
+  if (failure) throw failure;
+  combinedSignal.throwIfAborted();
+  if (!completed)
+    throw streamError ?? new Error("Eval stream ended before turn.completed");
+  if (!finalResponse) throw new Error("Eval turn completed without an answer");
+  return { finalResponse, usage };
+}
+
+export async function runPreparedEval(
+  prepared: PreparedEval,
+  codex: EvalCodex,
+  { model, signal }: { model?: string; signal?: AbortSignal } = {},
+) {
+  const { finalResponse, usage } = await runStructuredTurn(
+    prepared,
+    codex,
+    prepared.prompt,
+    outputSchema,
+    { model, signal },
+  );
+  const semanticResult = JSON.parse(finalResponse);
+  const report = {
+    requestedModel: model ?? null,
+    modelSelection: model
+      ? "explicit"
+      : "Codex default; SDK does not expose resolved model",
+    promptSha256: prepared.promptSha256,
+    referenceSha256: prepared.referenceSha256,
+    ...gradeResult(semanticResult, prepared.fixture),
+    usage,
+  };
+  return { report, semanticResult };
+}

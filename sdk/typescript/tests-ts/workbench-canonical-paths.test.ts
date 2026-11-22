@@ -1,18 +1,15 @@
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { nodeCommand } from "./support/shell.js";
+import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runPython } from "./support/python-probe.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-const temporaryDirectories: string[] = [];
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "codex-security-canonical-paths-",
+);
 const testCaseSensitive = process.platform === "linux" ? test : test.skip;
 const testPosix = process.platform === "win32" ? test.skip : test;
 const testWindows = process.platform === "win32" ? test : test.skip;
@@ -42,6 +39,7 @@ const simulatedPathProbe = [
   "deep_scan.Path = SimulatedPath",
   "deep_scan.os = SimpleNamespace(path=path_module)",
   "deep_scan.require_canonical_scan_directory = lambda path: path",
+  "deep_scan.configure(deep_scan)",
   "try:",
   "    result = deep_scan.deep_scan_path({'scan_dir': root}, supplied, 'Worker prompt path', kind='file')",
   "except SystemExit:",
@@ -50,6 +48,64 @@ const simulatedPathProbe = [
   "else:",
   "    accepted = True",
   "print(json.dumps({'accepted': accepted, 'nativePathEquality': path_type(supplied) == path_type(resolved), 'resolvedPath': result}))",
+].join("\n");
+
+const caseSensitiveWindowsHistoryProbe = [
+  "import json, sqlite3, sys",
+  "from pathlib import PureWindowsPath",
+  "from types import SimpleNamespace",
+  "sys.path.insert(0, sys.argv[1])",
+  "import workbench_scan_history as history",
+  "import workbench_target_state as target_state",
+  "class WindowsPath(PureWindowsPath):",
+  "    def expanduser(self):",
+  "        return self",
+  "    def absolute(self):",
+  "        return self",
+  "    def resolve(self, strict=False):",
+  "        return self",
+  "history.Path = WindowsPath",
+  "connection = sqlite3.connect(':memory:')",
+  "connection.row_factory = sqlite3.Row",
+  "connection.executescript('''",
+  "CREATE TABLE security_targets (id TEXT, current_path TEXT, repository_identity TEXT);",
+  "CREATE TABLE scans (id TEXT, target_id TEXT, target_path TEXT, repository_generation TEXT, status TEXT, started_at TEXT);",
+  "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
+  "''')",
+  "def target(identifier, path, identity):",
+  "    return connection.execute('SELECT ? AS target_id, ? AS target_path, ? AS repository_identity, ? AS repository_generation', (identifier, str(WindowsPath(path)), identity, identity)).fetchone()",
+  "upper_root = target('upper-root', 'D:/Repository', 'root-upper')",
+  "lower_root = target('lower-root', 'D:/repository', 'root-lower')",
+  "upper_scope = target('upper-scope', 'D:/Repository/Service', 'scope-upper')",
+  "lower_scope = target('lower-scope', 'D:/Repository/service', 'scope-lower')",
+  "linked_scope = target('linked-scope', 'E:/Linked/Service', 'scope-upper')",
+  "clone_scope = target('clone-scope', 'D:/Clone/Service', 'scope-clone')",
+  "same_path = target('same-path', 'D:/Repository/Service', None)",
+  "targets = [upper_root, lower_root, upper_scope, lower_scope, linked_scope, clone_scope]",
+  "identities = {entry['target_path']: entry['repository_identity'] for entry in targets}",
+  "def inspect(database, target_id, path, stored, **kwargs):",
+  "    identity = identities.get(path)",
+  "    repository = target_state.GitRepositoryIdentity(identity, WindowsPath(path).name, 'synthetic', 1, 2, 3, 3) if identity else None",
+  "    return target_state.RepositoryTargetState(target_id, path, stored, resolved_path=str(WindowsPath(path)), repository=repository, ownership_matches=True, strict_owner_matches=True)",
+  "target_state._inspect_repository_target = inspect",
+  "target_state.repository_origin = lambda path: ('example.test', 'synthetic/repository')",
+  "for entry in targets:",
+  "    connection.execute('INSERT INTO security_targets VALUES (?, ?, ?)', (entry['target_id'], entry['target_path'], entry['repository_identity']))",
+  "cache = history.RepositoryIdentityCache(connection)",
+  "checks = {",
+  "    'nativeWindowsScopeEquality': WindowsPath(upper_scope['target_path']) == WindowsPath(lower_scope['target_path']),",
+  "    'nativeWindowsRootEquality': WindowsPath(upper_root['target_path']) == WindowsPath(lower_root['target_path']),",
+  "    'caseSensitiveScopesMatch': cache.scope(lower_scope['target_id']).generation == cache.scope(upper_scope['target_id']).generation,",
+  "    'caseSensitiveRootsMatch': cache.scope(lower_root['target_id']).generation == cache.scope(upper_root['target_id']).generation,",
+  "    'linkedWorktreeMatches': cache.scope(linked_scope['target_id']).generation == cache.scope(upper_scope['target_id']).generation,",
+  "    'sameOriginCloneMatches': cache.scope(clone_scope['target_id']).generation == cache.scope(upper_scope['target_id']).generation,",
+  "    'exactResolvedPathMatches': history._same_repository(connection, same_path, upper_scope, identities=cache),",
+  "}",
+  "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?)', ('lower-scan', lower_scope['target_id'], lower_scope['target_path'], lower_scope['repository_generation'], 'complete', '2026-08-15T00:00:00Z'))",
+  "history._same_repository = lambda *args, **kwargs: False",
+  "selected = history.list_unmatched_scan_pairs(connection, SimpleNamespace(repository=upper_scope['target_path'], force=False), backfill_finding_details=lambda *args: None, read_coverage=lambda scan: {})",
+  "checks['caseSensitiveUnmatchedScanCount'] = selected['scanCount']",
+  "print(json.dumps(checks))",
 ].join("\n");
 
 const realFilesystemProbe = [
@@ -72,6 +128,7 @@ const realFilesystemProbe = [
   "    artifact_name = 'prompts/prompt.txt'",
   "    candidate_name = 'prompt.txt'",
   "deep_scan.require_canonical_scan_directory = workbench.require_canonical_scan_directory",
+  "deep_scan.configure(deep_scan)",
   "def accepted(action):",
   "    try:",
   "        action()",
@@ -88,21 +145,7 @@ const realFilesystemProbe = [
   "print(json.dumps(checks))",
 ].join("\n");
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
-
-async function temporaryDirectory(): Promise<string> {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-canonical-paths-")),
-  );
-  temporaryDirectories.push(directory);
-  return directory;
-}
+afterEach(cleanup);
 
 function runPythonProbe(
   program: string,
@@ -110,16 +153,13 @@ function runPythonProbe(
 ): Record<string, unknown> {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(python).not.toBeNull();
-  if (python === null) {
-    throw new Error(
-      "A Python interpreter is required for workbench path tests.",
-    );
-  }
 
-  const result = Bun.spawnSync(
-    [python, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts"), ...args],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const result = runPython(python!, [
+    "-c",
+    program,
+    join(PLUGIN_ROOT, "scripts"),
+    ...args,
+  ]);
   expect(new TextDecoder().decode(result.stderr)).toBe("");
   expect(result.exitCode).toBe(0);
   return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
@@ -129,6 +169,56 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
+  const nativeCaseAliases =
+    runPythonProbe(
+      [
+        "import json, sys, tempfile",
+        "from pathlib import Path",
+        "with tempfile.TemporaryDirectory(dir=sys.argv[2]) as directory:",
+        "    target = Path(directory) / 'component'",
+        "    target.mkdir()",
+        "    alias = target.with_name('COMPONENT')",
+        "    print(json.dumps({'supported': alias.exists() and alias.samefile(target)}))",
+      ].join("\n"),
+      tmpdir(),
+    )["supported"] === true;
+
+  test.skipIf(!nativeCaseAliases)(
+    "hashes and inventories native filesystem case aliases for Git roots and components",
+    async () => {
+      const root = await temporaryDirectory();
+      expect(
+        runPythonProbe(
+          [
+            "import json, subprocess, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "import workbench_target as target",
+            "root = Path(sys.argv[2])",
+            "repository = root / 'repository'",
+            "repository.mkdir()",
+            "subprocess.run(['git', 'init', '-q', str(repository)], check=True, capture_output=True)",
+            "component = repository / 'component'",
+            "component.mkdir()",
+            "(component / 'app.py').write_text('print(1)\\n')",
+            "(repository / 'root.py').write_text('print(2)\\n')",
+            "scopes = root / 'scopes.json'",
+            "scopes.write_text(json.dumps(['.']))",
+            "output = root / 'inventory.jsonl'",
+            "cases = [(root / 'REPOSITORY', repository, ['component/app.py', 'root.py']), (repository / 'COMPONENT', component, ['app.py'])]",
+            "for selected, original, expected in cases:",
+            "    assert selected.samefile(original)",
+            "    assert target.directory_content_digest(selected) == target.directory_content_digest(original)",
+            `    subprocess.run([${JSON.stringify(nodeCommand().command)}, str(Path(sys.argv[1]).parent / 'mcp' / 'helpers.mjs'), 'make-repo-scope-input', '--repo', str(selected), '--scopes-file', str(scopes), '--out', str(output)], check=True, capture_output=True)`,
+            "    assert [json.loads(line)['path'] for line in output.read_text().splitlines()] == expected",
+            "print(json.dumps({'targetsChecked': len(cases)}))",
+          ].join("\n"),
+          root,
+        ),
+      ).toEqual({ targetsChecked: 2 });
+    },
+  );
+
   test("reads Unicode commit subjects regardless of locale or Git log encoding", async () => {
     const repository = await temporaryDirectory();
     expect(
@@ -235,6 +325,19 @@ describe("bundled workbench canonical paths", () => {
     expect(runPythonProbe(simulatedPathProbe, "posix")).toMatchObject({
       accepted: false,
       nativePathEquality: false,
+    });
+  });
+
+  test("keeps case-sensitive Windows repository roots and scopes distinct", () => {
+    expect(runPythonProbe(caseSensitiveWindowsHistoryProbe)).toEqual({
+      nativeWindowsScopeEquality: true,
+      nativeWindowsRootEquality: true,
+      caseSensitiveScopesMatch: false,
+      caseSensitiveRootsMatch: false,
+      linkedWorktreeMatches: true,
+      sameOriginCloneMatches: false,
+      exactResolvedPathMatches: true,
+      caseSensitiveUnmatchedScanCount: 0,
     });
   });
 

@@ -1,4 +1,41 @@
+export { exportArtifact } from "./artifact-export.js";
+export type {
+  ExportArtifactOptions,
+  ArtifactExportResult,
+} from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
+export {
+  runHostedRemediation,
+  HostedRemediationInputSchema,
+  HostedRemediationPreparationError,
+} from "./hosted-remediation.js";
+export type {
+  HostedRemediationInput,
+  HostedRemediationOptions,
+  HostedRemediationResult,
+  RemediationExecutor,
+  RemediationExecutionRequest,
+  RemediationExecutionResult,
+  RemediationExecutionEvent,
+} from "./hosted-remediation.js";
+export { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
+export type { FindingPatch, FindingVerification } from "./remediation.js";
+export {
+  runHostedScan,
+  HostedScanInputSchema,
+  HostedScanPreparationError,
+} from "./hosted-scan.js";
+export type {
+  HostedScanInput,
+  HostedScanOptions,
+  HostedScanResult,
+} from "./hosted-scan.js";
+export type {
+  ScanExecutor,
+  ScanExecutionRequest,
+  ScanExecutionResult,
+  ScanExecutionEvent,
+} from "./scan-executor.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {
   ResolvedProjectConfig,
@@ -8,11 +45,17 @@ export type {
   ProjectConfigInput,
   ProjectScope,
 } from "./project-config-schema.js";
+export type {
+  DependencyEndpointConfiguration,
+  DependencyRuntimeSelector,
+} from "./dependency-caller-scope.js";
 export type { ScanSettings } from "./scan-settings.js";
+export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";
-export { suggestOwners } from "./suggest-owners.js";
+export { suggestOwners, suggestOwnersFromScan } from "./suggest-owners.js";
 export type {
   OwnerFinding,
+  CodeownerIdentity,
   OwnerIdentity,
   OwnerSuggestion,
   OwnerSuggestions,
@@ -46,8 +89,17 @@ export type {
   ComponentPlanningOptions,
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost, ScanSessionEvent } from "./cost.js";
-export type { DeepScanProgress } from "./deep-progress.js";
+export type {
+  ScanAccountRateLimit,
+  ScanAccountRateLimitWindow,
+  ScanCost,
+  ScanSessionEvent,
+  ScanUsageMeasurement,
+  ScanUsageObservation,
+  ScanWorkerEvent,
+} from "./cost.js";
+export type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
+export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export { matchScanFindings } from "./scan-comparison.js";
@@ -60,9 +112,12 @@ export type {
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
+  PatchOptions,
+  PatchResult,
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,
+  ScanLifecycle,
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
@@ -88,6 +143,7 @@ export {
   DeduplicationReviewError,
   IncompleteScanError,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
@@ -160,6 +216,78 @@ export type {
   DeduplicateScanResult,
 } from "./deduplication/scan.js";
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
+export type { FindingEmbeddingBinding } from "./deduplication/local.js";
+export type {
+  PublicationTelemetry,
+  PublicationTelemetryObserver,
+} from "./publication-telemetry.js";
+export type {
+  DeduplicationDiagnostic,
+  DeduplicationDiagnosticObserver,
+} from "./deduplication/diagnostics.js";
+export type {
+  FindingEmbedder,
+  EmbeddingUsageObservation,
+  EmbeddingUsageObserver,
+} from "./server/embeddings.js";
+export {
+  ExternalPublicationError,
+  prepareExternalPublication,
+  prepareNormalizedExternalPublication,
+} from "./external-findings-publish.js";
+export type {
+  ExternalPublicationOptions,
+  NormalizedExternalPublicationOptions,
+  ExternalPublicationDependencies,
+  ExternalPublicationPreview,
+  ExternalPublicationProgress,
+  ExternalPublicationResult,
+  PreparedExternalPublication,
+} from "./external-findings-publish.js";
+export {
+  prepareNormalizedLocalImport,
+  listLocalExternalImports,
+  listLocalExternalFindings,
+  listLocalFindingPublications,
+  selectLocalExternalFindings,
+} from "./external-findings-local.js";
+export type {
+  ExternalFindingProvenance,
+  LocalExternalFindingSelection,
+  SelectedLocalExternalFindings,
+  StoredExternalImport,
+  StoredFindingPublication,
+  StoredExternalFinding,
+  NormalizedLocalImportOptions,
+  LocalExternalImportDependencies,
+  LocalExternalImportPreview,
+  LocalExternalImportResult,
+  PreparedLocalExternalImport,
+} from "./external-findings-local.js";
+export {
+  NoPublishableFindingsError,
+  type ExternalFinding,
+  type ExternalFindings,
+  type ExternalSourceRepository,
+} from "./external-findings.js";
+export type {
+  ExternalFindingEvidence,
+  FindingImportRequest,
+  FindingImportReceipt,
+  ImportRepository,
+  SourceReport,
+} from "./external-import-models.js";
+export {
+  normalizeGitHubCodeScanningAlerts,
+  normalizeGitHubAdvisories,
+  readGitHubFindings,
+} from "./github-findings.js";
+export { importGitHubAdvisories } from "./github-advisories.js";
+export { normalizeGitHubDependabotAlerts } from "./github-dependabot-findings.js";
+export type {
+  GitHubAdvisoryImportOptions,
+  ImportedGitHubAdvisory,
+} from "./github-advisories.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,
@@ -212,3 +340,112 @@ export {
 export type { NormalizedTarget, ScanMode, ScanTarget } from "./targets.js";
 export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
+
+export {
+  classifySeverityRecords,
+  classifySeverityRecordsInputSchema,
+} from "./classify-severity-records.js";
+export type {
+  ClassifySeverityRecordsInput,
+  ClassifySeverityRecordsOptions,
+  ClassifySeverityRecordsResult,
+  CanonicalSeverityAssessment,
+  SeverityClassificationReviewRequest,
+  SeverityDiagnosticCode,
+  SeverityRecordDiagnosticCode,
+} from "./classify-severity-records.js";
+export { validateRecords } from "./validation-records.js";
+export type {
+  ValidateRecordsInput,
+  ValidateRecordsOptions,
+  ValidationReviewRequest,
+} from "./validation-records.js";
+
+export {
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "./operation-telemetry.js";
+export type {
+  OperationTelemetryEvent,
+  OperationOutcome,
+  OperationFailureCategory,
+} from "./operation-telemetry.js";
+
+export {
+  prepareLocalExternalImport,
+  type LocalExternalImportOptions,
+} from "./external-findings-import.js";
+export {
+  prepareStoredFindingsPublication,
+  type StoredFindingsPublication,
+  type StoredFindingsPublicationGroup,
+} from "./stored-findings-publication.js";
+export { readTenableFindings } from "./tenable-findings.js";
+export { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
+export {
+  normalizeOpenGrepFindings,
+  readOpenGrepFindings,
+  type OpenGrepImportOptions,
+} from "./opengrep-findings.js";
+export { readSonarFindings, type SonarCapture } from "./sonar-findings.js";
+export {
+  collectSonarIssues,
+  type SonarCollectionOptions,
+} from "./sonar-collector.js";
+export {
+  normalizeVeracodeFindings,
+  readVeracodeFindings,
+} from "./veracode-findings.js";
+export { normalizeTrivyFindings, readTrivyFindings } from "./trivy-findings.js";
+export {
+  normalizeBlackDuckFindings,
+  readBlackDuckFindings,
+} from "./blackduck-findings.js";
+export {
+  normalizeContinuumFindings,
+  readContinuumFindings,
+} from "./continuum-findings.js";
+export { readCheckmarxFindings } from "./checkmarx-findings.js";
+export {
+  normalizeInspectorFindings,
+  readInspectorFindings,
+} from "./inspector-findings.js";
+export {
+  normalizeSnykFindingsExport,
+  normalizeSnykJson,
+  normalizeSnykSarif,
+  readSnykFindings,
+} from "./snyk-findings.js";
+export {
+  collectSnykIssues,
+  normalizeSnykIssues,
+  SNYK_REST_ISSUES_FORMAT,
+  type CollectSnykIssuesOptions,
+  type SnykIssuesExport,
+  type SnykIssuesFindings,
+  type SnykIssuesProduct,
+} from "./snyk-rest-findings.js";
+export {
+  normalizeSemgrepFindings,
+  normalizeSemgrepSarif,
+  readSemgrepFindings,
+  type SemgrepImportOptions,
+} from "./semgrep-findings.js";
+export { collectSemgrepPlatformFindings } from "./semgrep-platform-collector.js";
+export { collectSelectedSemgrepGuardianFindings } from "./semgrep-guardian-findings.js";
+export type {
+  SemgrepPlatformOptions,
+  SemgrepPlatformReport,
+} from "./semgrep-platform-collector.js";
+export type { HostedScannerHttpOptions } from "./hosted-scanner-http.js";
+export {
+  normalizeSelectedSemgrepPlatformFindings,
+  selectSemgrepPlatformFindings,
+  normalizeSemgrepPlatformFindings,
+  type SemgrepPlatformSelection,
+} from "./semgrep-platform-findings.js";
+export {
+  normalizeEndorFindings,
+  normalizeEndorSarif,
+  readEndorFindings,
+} from "./endor-findings.js";
