@@ -175,7 +175,10 @@ try {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     const endpoint = `http://127.0.0.1:${address.port}`;
-    for (const provider of ['openai', 'amazon-bedrock']) {
+    // A renamed fork CLI starts Codex through codex-acp, which does not carry
+    // the native thread source, so this native attribution check does not apply.
+    const attributionProviders = installed.name === '@openai/codex-security' ? ['openai', 'amazon-bedrock'] : [];
+    for (const provider of attributionProviders) {
       requests.length = 0;
       const requestHome = join(root, `request-${provider}`);
       const codexHome = join(requestHome, '.codex');
