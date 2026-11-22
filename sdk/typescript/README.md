@@ -29,7 +29,13 @@ before this assignment-diagnostic stage.
 | `artifacts/01_context/host-review/incomplete-review.json`              | Partial coverage, missing files, assignment history and unvalidated candidates after failure or cancellation.                         |
 | `incomplete-report.md`                                                 | Readable incomplete-scan summary linking to the diagnostics.                                                                          |
 
-Complete host reviews still produce `review.json` for the coordinator. Only the
+Host reviews that verify at least one file produce `review.json` for the
+coordinator. Files that still lack read evidence after recovery are listed
+under its `uncoveredFiles` and recorded as deferred coverage, so the scan
+completes with partial coverage instead of failing. Verified files are
+checkpointed under the state directory's `host-review-checkpoints/`; rerunning
+the same scan reuses those whose contents are unchanged, and the checkpoint is
+removed after a scan completes with full coverage. Only the
 normal validation/reporting workflow produces the canonical `report.md`.
 An incomplete summary does not turn failure into success: SDK calls still reject,
 CLI commands still exit nonzero, and coverage requirements remain unchanged.
@@ -353,8 +359,10 @@ sessions. Native history traversal within a large scan still depends on Muse.
 Invalid model configuration stops review recovery immediately. Structured turn
 failures, whether or not the turn may have been submitted, receive at most two
 attempts of the same read-only assignment before the scan stops with the
-original error. Smaller-file recovery continues for incomplete read evidence,
-without relaxing coverage checks.
+original error. Smaller-file recovery continues for incomplete read evidence;
+files that still lack it are reported as deferred coverage, never as reviewed.
+Binary files are assigned with a request for a shell byte read that names
+their path, because some read tools return images without one.
 
 Muse owns authentication and model selection. Bex passes its stdio security
 workbench through ACP and uses noninteractive approval handling for automated

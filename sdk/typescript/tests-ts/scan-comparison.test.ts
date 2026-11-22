@@ -61,24 +61,28 @@ function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
   return { occurrenceId };
 }
 
-function fakeCodex(response: unknown) {
+/** Answer every turn with `response`, or with each of `responses` in order. */
+function fakeCodex(response: unknown, ...responses: unknown[]) {
   const calls: {
     prompt?: string;
+    prompts: string[];
     threadOptions?: ThreadOptions;
     turnOptions?: TurnOptions;
-  } = {};
+  } = { prompts: [] };
+  const answers = [response, ...responses];
   const codex: NonNullable<ScanComparisonOptions["codex"]> = {
     startThread(options) {
       calls.threadOptions = options;
       return {
         async run(prompt, turnOptions) {
           calls.prompt = prompt;
+          calls.prompts.push(prompt);
           calls.turnOptions = turnOptions;
+          const answer =
+            answers[Math.min(calls.prompts.length, answers.length) - 1];
           return {
             finalResponse:
-              typeof response === "string"
-                ? response
-                : JSON.stringify(response),
+              typeof answer === "string" ? answer : JSON.stringify(answer),
           };
         },
       };
@@ -1521,19 +1525,20 @@ describe("semantic scan comparison", () => {
     await expect(
       matchScanFindings(input, { codex: invalid.codex }),
     ).rejects.toThrow("unknown before occurrence");
-    expect(JSON.parse(invalid.calls.prompt!.split("\n").at(-1)!)).toMatchObject(
-      {
-        findings: {
-          before: [
-            {
-              occurrenceId: "before-b",
-              occurrenceCount: 2,
-              issueId: "known-a",
-            },
-          ],
-        },
+    expect(invalid.calls.prompts).toHaveLength(2);
+    expect(
+      JSON.parse(invalid.calls.prompts[0]!.split("\n").at(-1)!),
+    ).toMatchObject({
+      findings: {
+        before: [
+          {
+            occurrenceId: "before-b",
+            occurrenceCount: 2,
+            issueId: "known-a",
+          },
+        ],
       },
-    );
+    });
 
     const valid = {
       ...response,
@@ -1556,6 +1561,62 @@ describe("semantic scan comparison", () => {
       ],
       uncertain: [],
     });
+  });
+
+  test("corrects a rejected answer once in the same thread", async () => {
+    const input = {
+      before: [finding("before-1")],
+      after: [finding("after-1")],
+    };
+    const invented = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["invented"],
+          afterOccurrenceIds: ["after-1"],
+          confidence: "high" as const,
+          reason: "Same root cause.",
+        },
+      ],
+      uncertain: [],
+    };
+    const corrected = {
+      ...invented,
+      matches: [{ ...invented.matches[0]!, beforeOccurrenceIds: ["before-1"] }],
+    };
+    const { codex, calls } = fakeCodex(invented, corrected);
+
+    expect(await matchScanFindings(input, { codex })).toMatchObject({
+      matches: [
+        { beforeOccurrenceIds: ["before-1"], afterOccurrenceIds: ["after-1"] },
+      ],
+    });
+    expect(calls.prompts).toHaveLength(2);
+    expect(calls.prompts[1]).toContain(
+      "Your previous answer was rejected: Scan comparison referenced an unknown before occurrence.",
+    );
+  });
+
+  test("keeps cost-limited comparisons to one turn", async () => {
+    const { codex, calls } = fakeCodex({
+      matches: [
+        {
+          beforeOccurrenceIds: ["invented"],
+          afterOccurrenceIds: ["after-1"],
+          confidence: "high",
+          reason: "Same root cause.",
+        },
+      ],
+      uncertain: [],
+    });
+
+    await expect(
+      matchScanFindingsInternal(
+        { before: [finding("before-1")], after: [finding("after-1")] },
+        { codex },
+        { surface: "cli", singleTurn: true },
+      ),
+    ).rejects.toThrow("unknown before occurrence");
+    expect(calls.prompts).toHaveLength(1);
   });
 
   const match = (beforeOccurrenceIds = ["before-1"]) => ({

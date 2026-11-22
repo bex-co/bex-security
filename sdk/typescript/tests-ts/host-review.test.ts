@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { ConfigurationError } from "../src/errors.js";
 import {
+  recordUncoveredCoverage,
   runHostReviewAssignments,
   type HostReviewClient,
 } from "../src/host-review.js";
@@ -40,6 +41,7 @@ function client(
   repository: string,
   turns: FakeTurn[],
   validation: unknown = VALIDATION,
+  prompts: string[] = [],
 ): HostReviewClient {
   let next = 0;
   return {
@@ -69,6 +71,7 @@ function client(
               })(),
             };
           }
+          prompts.push(input);
           const turn = turns[next++] ?? { read: [], claimed: [] };
           if (turn.startError) throw turn.startError;
           async function* events() {
@@ -239,23 +242,26 @@ describe("host ACP review assignments", () => {
     }
   });
 
-  test("retains partial coverage, candidates and exact missing-file retries", async () => {
+  test("defers files without read evidence and keeps exact missing-file retries", async () => {
     const value = await fixture();
     try {
-      await expect(
-        runHostReviewAssignments({
-          ...reviewOptions(value),
-          client: client(value.repository, [
-            { read: ["a.ts"], claimed: ["a.ts"] },
-          ]),
-        }),
-      ).rejects.toThrow("(1/2 files)");
-      const root = diagnosticRoot(value);
-      expect(await json(join(root, "incomplete-review.json"))).toMatchObject({
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        client: client(value.repository, [
+          { read: ["a.ts"], claimed: ["a.ts"] },
+        ]),
+      });
+      expect(result).toMatchObject({
         filesReviewed: 1,
-        missingFiles: ["b.ts"],
+        uncoveredFiles: [{ path: "b.ts" }],
+      });
+      const root = diagnosticRoot(value);
+      expect(await json(result.artifactPath)).toMatchObject({
+        filesReviewed: 1,
+        uncoveredFiles: [{ path: "b.ts" }],
         candidates: [{ path: "a.ts" }],
       });
+      expect(await readdir(root)).not.toContain("incomplete-review.json");
       expect(
         await json(join(root, "assignment-1-attempt-1", "result.json")),
       ).toMatchObject({
@@ -793,6 +799,201 @@ describe("host ACP review assignments", () => {
         }),
       ).rejects.toThrow(/lacked completed read evidence/);
       expect(progress).toEqual([]);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("resumes unchanged files from an earlier scan and retries only the rest", async () => {
+    const value = await fixture();
+    const options = {
+      ...reviewOptions(value),
+      workers: 1,
+      checkpointDirectory: join(value.root, "checkpoints"),
+      checkpointIdentity: { agent: "synthetic-agent", model: "default" },
+    };
+    try {
+      const first = await runHostReviewAssignments({
+        ...options,
+        client: client(value.repository, [
+          { read: ["a.ts"], claimed: ["a.ts"] },
+        ]),
+      });
+      expect(first.uncoveredFiles.map((file) => file.path)).toEqual(["b.ts"]);
+
+      const prompts: string[] = [];
+      const secondScan = join(value.root, "scan-2");
+      await mkdir(secondScan);
+      const second = await runHostReviewAssignments({
+        ...options,
+        scanDirectory: secondScan,
+        client: client(
+          value.repository,
+          [{ read: ["b.ts"], claimed: ["b.ts"] }],
+          VALIDATION,
+          prompts,
+        ),
+      });
+
+      expect(second).toMatchObject({
+        filesReviewed: 2,
+        resumedFiles: 1,
+        uncoveredFiles: [],
+        checkpointPath: first.checkpointPath,
+      });
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain('["b.ts"]');
+      // Resumed candidates still go through host validation.
+      expect((await json(second.artifactPath)).candidates).toContainEqual(
+        expect.objectContaining({
+          path: "a.ts",
+          hostValidation: expect.objectContaining({ verdict: "rejected" }),
+        }),
+      );
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("re-reviews checkpointed files whose contents changed", async () => {
+    const value = await fixture();
+    const options = {
+      ...reviewOptions(value),
+      workers: 1,
+      checkpointDirectory: join(value.root, "checkpoints"),
+    };
+    try {
+      await runHostReviewAssignments({
+        ...options,
+        client: client(value.repository, [
+          { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] },
+        ]),
+      });
+      await writeFile(join(value.repository, "a.ts"), "export const a = 3;\n");
+
+      const prompts: string[] = [];
+      const secondScan = join(value.root, "scan-2");
+      await mkdir(secondScan);
+      const second = await runHostReviewAssignments({
+        ...options,
+        scanDirectory: secondScan,
+        client: client(
+          value.repository,
+          [{ read: ["a.ts"], claimed: ["a.ts"] }],
+          VALIDATION,
+          prompts,
+        ),
+      });
+
+      expect(second).toMatchObject({ filesReviewed: 2, resumedFiles: 1 });
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain('["a.ts"]');
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps files verified before a failure for the next run", async () => {
+    const value = await fixture();
+    const options = {
+      ...reviewOptions(value),
+      workers: 1,
+      checkpointDirectory: join(value.root, "checkpoints"),
+    };
+    try {
+      await expect(
+        runHostReviewAssignments({
+          ...options,
+          client: client(
+            value.repository,
+            [{ read: ["a.ts"], claimed: ["a.ts"] }],
+            new ConfigurationError("synthetic validation setup failure"),
+          ),
+        }),
+      ).rejects.toThrow("synthetic validation setup failure");
+
+      const prompts: string[] = [];
+      const secondScan = join(value.root, "scan-2");
+      await mkdir(secondScan);
+      const second = await runHostReviewAssignments({
+        ...options,
+        scanDirectory: secondScan,
+        client: client(
+          value.repository,
+          [{ read: ["b.ts"], claimed: ["b.ts"] }],
+          VALIDATION,
+          prompts,
+        ),
+      });
+
+      expect(second).toMatchObject({ filesReviewed: 2, resumedFiles: 1 });
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain('["b.ts"]');
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("asks for a shell byte read of binary files", async () => {
+    const value = await fixture();
+    await writeFile(
+      join(value.repository, "logo.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
+    );
+    const prompts: string[] = [];
+    try {
+      await runHostReviewAssignments({
+        ...reviewOptions(value),
+        expectedFilesTotal: 3,
+        workers: 1,
+        client: client(
+          value.repository,
+          [
+            {
+              read: ["a.ts", "b.ts", "logo.png"],
+              claimed: ["a.ts", "b.ts", "logo.png"],
+            },
+          ],
+          VALIDATION,
+          prompts,
+        ),
+      });
+
+      expect(prompts[0]).toContain(
+        'These assigned files are binary: ["logo.png"]',
+      );
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("records uncovered files as deferred coverage", async () => {
+    const value = await fixture();
+    const coveragePath = join(value.scanDirectory, "coverage.json");
+    await writeFile(
+      coveragePath,
+      JSON.stringify({ completeness: "complete", deferred: [] }),
+    );
+    try {
+      await recordUncoveredCoverage(
+        value.scanDirectory,
+        [
+          {
+            path: "b.ts",
+            reason: "1 assigned files lacked completed read evidence",
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      const coverage = await json(coveragePath);
+      expect(coverage.completeness).toBe("partial");
+      expect(coverage.deferred).toEqual([
+        expect.objectContaining({
+          id: "host-review-uncovered-files",
+          paths: ["b.ts"],
+        }),
+      ]);
     } finally {
       await rm(value.root, { recursive: true, force: true });
     }

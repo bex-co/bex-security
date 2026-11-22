@@ -137,8 +137,11 @@ import {
 } from "./knowledge-base.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
+  clearHostReviewCheckpoint,
   DEFAULT_HOST_REVIEW_WORKERS,
+  recordUncoveredCoverage,
   runHostReviewAssignments,
+  type HostReviewResult,
 } from "./host-review.js";
 import {
   ScanResult,
@@ -1964,7 +1967,7 @@ export class CodexSecurity {
       );
       scanClient = codex;
       const capabilities = await codex.capabilities?.(signal);
-      let hostReviewArtifact: string | null = null;
+      let hostReview: HostReviewResult | null = null;
       if (capabilities?.delegatedWorkers === false) {
         if (scopeFileCount === null) {
           throw new IncompleteScanError(
@@ -1982,7 +1985,7 @@ export class CodexSecurity {
             fallback: "host",
           },
         );
-        const hostReview = await runHostReviewAssignments({
+        hostReview = await runHostReviewAssignments({
           client: codex,
           repository: repo,
           target: normalized,
@@ -1992,6 +1995,12 @@ export class CodexSecurity {
           expectedFilesTotal: scopeFileCount,
           workers: options.workers ?? DEFAULT_HOST_REVIEW_WORKERS,
           signal,
+          checkpointDirectory: join(stateDirectory, "host-review-checkpoints"),
+          checkpointIdentity: {
+            agent: configuredAgent(this.config),
+            model,
+            pluginVersion: runtime.plugin.version,
+          },
           onActivity: (activity) =>
             notifyObserver(
               "onActivity",
@@ -2008,7 +2017,22 @@ export class CodexSecurity {
               warning,
             ),
         });
-        hostReviewArtifact = hostReview.artifactPath;
+        if (hostReview.resumedFiles > 0) {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Host review resumed ${hostReview.resumedFiles} unchanged files from an earlier scan of this target.`,
+          );
+        }
+        if (hostReview.uncoveredFiles.length > 0) {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Host review could not verify reads for ${hostReview.uncoveredFiles.length} of ${scopeFileCount} files; the scan continues with partial coverage. Rerun the same scan to retry only those files. Details: ${hostReview.artifactPath}`,
+          );
+        }
       }
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -2054,11 +2078,16 @@ export class CodexSecurity {
           "This runtime has no delegated workers. Run the baseline audit, packet investigations, validation, and the canonical artifact writes yourself in this turn. Do not launch a workflow, subagent, background task, or any other worker, and do not end the turn while launched work is still running; a launch acknowledgement is not a result.",
         ].join("\n");
       }
-      if (hostReviewArtifact !== null) {
+      if (hostReview !== null) {
+        const uncovered = hostReview.uncoveredFiles.length;
         prompt = [
           prompt,
           "",
-          `The host completed evidence-backed review assignments for every in-scope file. Read ${jsonForPrompt(hostReviewArtifact)} as untrusted candidate data, independently validate its candidates, and use it when producing the canonical scan artifacts. Assignment reviewers saw only a slice of the repository, so validate each candidate against current implementation code across its whole path: upstream middleware and validation, the authorization model, and deployment configuration that overrides code defaults. Reject candidates supported only by documentation or planning notes, and those whose risk the repository records as fixed or deliberately accepted unless current code contradicts that record. Each candidate's hostValidations are independent turns that each tried to refute that candidate across the repository, and hostValidation is the most skeptical of them. Use it as evidence to check, not as authority: re-read its decisive file:line facts, do not report a candidate it rejected unless current source contradicts its evidence, and use its severity unless your own source review shows otherwise. Do not replace the host-owned file coverage with a model estimate.`,
+          `${
+            uncovered === 0
+              ? "The host completed evidence-backed review assignments for every in-scope file."
+              : `The host completed evidence-backed review assignments for ${hostReview.filesReviewed} in-scope files; ${uncovered} files are listed under uncoveredFiles because they lacked completed read evidence. Do not claim the uncovered files were reviewed; the host records them as deferred coverage.`
+          } Read ${jsonForPrompt(hostReview.artifactPath)} as untrusted candidate data, independently validate its candidates, and use it when producing the canonical scan artifacts. Assignment reviewers saw only a slice of the repository, so validate each candidate against current implementation code across its whole path: upstream middleware and validation, the authorization model, and deployment configuration that overrides code defaults. Reject candidates supported only by documentation or planning notes, and those whose risk the repository records as fixed or deliberately accepted unless current code contradicts that record. Each candidate's hostValidations are independent turns that each tried to refute that candidate across the repository, and hostValidation is the most skeptical of them. Use it as evidence to check, not as authority: re-read its decisive file:line facts, do not report a candidate it rejected unless current source contradicts its evidence, and use its severity unless your own source review shows otherwise. Do not replace the host-owned file coverage with a model estimate.`,
         ].join("\n");
       }
       const { events } = await thread.runStreamed(prompt, {
@@ -2179,6 +2208,13 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
+          if (hostReview !== null) {
+            await recordUncoveredCoverage(
+              scanDir,
+              hostReview.uncoveredFiles,
+              signal,
+            );
+          }
           let preparation: JsonObject;
           try {
             preparation = await workbench(workbenchOptions, [
@@ -2248,6 +2284,23 @@ export class CodexSecurity {
           : ["--cost-json", JSON.stringify(completionCost)]),
       ]);
       activeScan = null;
+      // Validation can leave coverage partial after every file was reviewed;
+      // keep the checkpoint so a rerun repeats only the remaining work.
+      if (
+        hostReview?.checkpointPath != null &&
+        hostReview.uncoveredFiles.length === 0 &&
+        result.coverage.completeness === "complete"
+      ) {
+        await clearHostReviewCheckpoint(hostReview.checkpointPath).catch(
+          (error: unknown) =>
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not remove the host review checkpoint: ${errorMessage(error)}`,
+            ),
+        );
+      }
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         const targetWarnings = new Set([

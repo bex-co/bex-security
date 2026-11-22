@@ -346,8 +346,14 @@ result informs the final validation. The existing scan command needs no
 Muse-specific orchestration flag.
 
 Host-managed reviews save per-attempt requests and outcomes in the scan output
-directory. If assignment review fails or is canceled, `incomplete-report.md` explains the
-coverage gap and links to retained diagnostics and unvalidated candidates.
+directory. Files that still lack read evidence after every retry do not stop
+the scan: the report marks coverage as partial and lists them as deferred work.
+Bex keeps a checkpoint of the verified files in its state directory, so running
+the same scan again reuses files whose contents have not changed and retries
+only the rest; the checkpoint is removed once a scan completes with full
+coverage. If assignment review stops on a setup failure, is canceled, or
+verifies no file at all, `incomplete-report.md` explains the coverage gap and
+links to retained diagnostics and unvalidated candidates.
 The scan still fails; this summary is not the validated `report.md`.
 See [retained host-review diagnostics](sdk/typescript/README.md#host-review-diagnostics)
 for artifact details and output retention.
