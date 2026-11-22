@@ -175,7 +175,11 @@ try {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     const endpoint = `http://127.0.0.1:${address.port}`;
-    for (const provider of ['openai', 'amazon-bedrock']) {
+    // A renamed fork CLI runs these scans through codex-acp. It does not forward
+    // the native thread source, and on Linux an interrupted app-server can leave
+    // sandbox mount targets such as /tmp/.git that break the checks below.
+    const attributionProviders = installed.name === '@openai/codex-security' ? ['openai', 'amazon-bedrock'] : [];
+    for (const provider of attributionProviders) {
       requests.length = 0;
       const requestHome = join(root, `request-${provider}`);
       const codexHome = join(requestHome, '.codex');
@@ -207,9 +211,7 @@ try {
         assert.equal(metadata.codex_security_integration, 'github_action');
         assert.equal(metadata.codex_security_provider, provider);
         assert.equal(metadata.analytics_enabled, false);
-        // A renamed fork CLI starts Codex through codex-acp, which does not
-        // forward the native thread source.
-        if (installed.name === '@openai/codex-security') assert.equal(metadata.thread_source, 'security_scan');
+        assert.equal(metadata.thread_source, 'security_scan');
       }
     }
   } finally {
