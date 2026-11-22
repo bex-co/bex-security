@@ -1,7 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import {
@@ -60,6 +61,12 @@ interface AcpAgentDriver {
     options: CodexOptions,
     threadOptions: ThreadOptions,
   ): NodeJS.ProcessEnv;
+  /** Creates per-process launch files, removed after the agent exits. */
+  prepareLaunch?(
+    options: CodexOptions,
+    environment: NodeJS.ProcessEnv,
+    require: NodeRequire,
+  ): PreparedLaunch | undefined;
   mcpServers(options: CodexOptions): Promise<McpServer[]>;
   additionalDirectories(
     options: CodexOptions,
@@ -78,6 +85,11 @@ interface AcpAgentDriver {
 interface AgentLaunch {
   command: string;
   args: string[];
+}
+
+interface PreparedLaunch {
+  environment: NodeJS.ProcessEnv;
+  cleanup(): void;
 }
 
 interface SessionConfiguration {
@@ -545,13 +557,35 @@ export class AcpAgentThread {
       this.#codexOptions,
       this.#threadOptions,
     );
+    let prepared: PreparedLaunch | undefined;
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned || prepared === undefined) return;
+      cleaned = true;
+      try {
+        prepared.cleanup();
+      } catch {
+        // A launcher still held open on Windows only leaves a private temp file.
+      }
+    };
     try {
-      return spawn(launch.command, launch.args, {
-        env: environment,
+      prepared = this.#driver.prepareLaunch?.(
+        this.#codexOptions,
+        environment,
+        require,
+      );
+      const child = spawn(launch.command, launch.args, {
+        env: prepared?.environment ?? environment,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
+      if (prepared !== undefined) {
+        child.once("close", cleanup);
+        child.once("error", cleanup);
+      }
+      return child;
     } catch (error) {
+      cleanup();
       throw acpAgentFailure(error, this.#driver.name);
     }
   }
@@ -1017,6 +1051,56 @@ function nodeLaunch(path: string): AgentLaunch {
   return { command: process.execPath, args: [path] };
 }
 
+/** App-server would otherwise save an API-key login over the shared sign-in. */
+const EPHEMERAL_CREDENTIALS = "-c cli_auth_credentials_store=ephemeral";
+
+/**
+ * codex-acp starts `CODEX_PATH app-server` with no other arguments, so a
+ * private launcher adds the in-memory credential store to that process only.
+ */
+function ephemeralCredentialLaunch(
+  environment: NodeJS.ProcessEnv,
+  require: NodeRequire,
+): PreparedLaunch {
+  const codexPath = environment["CODEX_PATH"];
+  const target =
+    codexPath === undefined
+      ? [
+          process.execPath,
+          createRequire(
+            require.resolve("@agentclientprotocol/codex-acp"),
+          ).resolve("@openai/codex/bin/codex.js"),
+        ]
+      : [codexPath];
+  const directory = mkdtempSync(join(tmpdir(), "bex-security-codex-"));
+  const windows = process.platform === "win32";
+  const launcher = join(directory, windows ? "codex.cmd" : "codex");
+  const command = target
+    .map((part) =>
+      windows
+        ? `"${part.replaceAll("%", "%%")}"`
+        : `'${part.replaceAll("'", "'\\''")}'`,
+    )
+    .join(" ");
+  writeFileSync(
+    launcher,
+    windows
+      ? `@echo off\r\n${command} %* ${EPHEMERAL_CREDENTIALS}\r\n`
+      : `#!/bin/sh\nexec ${command} "$@" ${EPHEMERAL_CREDENTIALS}\n`,
+    { mode: 0o700 },
+  );
+  return {
+    environment: { ...environment, CODEX_PATH: launcher },
+    cleanup: () =>
+      rmSync(directory, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 100,
+      }),
+  };
+}
+
 const CODEX_DRIVER: AcpAgentDriver = {
   name: "codex",
   launch: (require, override) =>
@@ -1040,7 +1124,17 @@ const CODEX_DRIVER: AcpAgentDriver = {
       ...(options.apiKey === undefined
         ? {}
         : { CODEX_API_KEY: options.apiKey }),
+      // codex-acp signs in with CODEX_API_KEY only when asked to. An empty
+      // key would make it fall back to an ambient OPENAI_API_KEY.
+      ...(options.apiKey
+        ? { DEFAULT_AUTH_REQUEST: JSON.stringify({ methodId: "api-key" }) }
+        : {}),
     };
+  },
+  prepareLaunch(options, environment, require) {
+    return options.apiKey
+      ? ephemeralCredentialLaunch(environment, require)
+      : undefined;
   },
   async mcpServers() {
     return [];

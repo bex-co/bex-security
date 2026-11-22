@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
@@ -15,6 +16,9 @@ import {
 
 const AGENT_PATH = fileURLToPath(
   new URL("./fixtures/acp-agent.mjs", import.meta.url),
+);
+const APP_SERVER_PATH = fileURLToPath(
+  new URL("./fixtures/codex-app-server.mjs", import.meta.url),
 );
 
 const clients: AcpAgentClient[] = [];
@@ -548,6 +552,124 @@ describe("ACP adapter", () => {
         CODEX_API_KEY: "synthetic-codex-key",
       }),
     ).toEqual({ PATH: "/synthetic/bin" });
+  });
+});
+
+describe("Codex app-server sign-in", () => {
+  // codex-acp runs `CODEX_PATH app-server`, here the synthetic app-server.
+  async function appServerLauncher(directory: string): Promise<string> {
+    if (process.platform === "win32") {
+      const launcher = join(directory, "codex.cmd");
+      await writeFile(
+        launcher,
+        `@"${process.execPath}" "${APP_SERVER_PATH}" %*\r\n`,
+      );
+      return launcher;
+    }
+    const launcher = join(directory, "codex");
+    await writeFile(
+      launcher,
+      `#!/bin/sh\nexec '${process.execPath}' '${APP_SERVER_PATH}' "$@"\n`,
+      { mode: 0o700 },
+    );
+    return launcher;
+  }
+
+  async function signIn(options: { apiKey?: string; signedIn?: boolean }) {
+    const root = await mkdtemp(join(tmpdir(), "bex-app-server-"));
+    try {
+      const traceFile = join(root, "trace.jsonl");
+      const codexHome = join(root, "codex-home");
+      await mkdir(codexHome);
+      const launcher = await appServerLauncher(root);
+      const client = agentClient(
+        {
+          codexPathOverride: launcher,
+          ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+          env: {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(([key]) =>
+                /^(path|pathext|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(
+                  key,
+                ),
+              ),
+            ),
+            CODEX_HOME: codexHome,
+            OPENAI_API_KEY: "synthetic-ambient-key",
+            BEX_TEST_APP_SERVER_TRACE: traceFile,
+            ...(options.signedIn ? { BEX_TEST_APP_SERVER_SIGNED_IN: "1" } : {}),
+          },
+        },
+        { agent: "codex" },
+      );
+      const thread = client.startThread({
+        workingDirectory: root,
+        skipGitRepoCheck: true,
+      });
+      await thread.run("scan the repository");
+      await client.close();
+      const trace = (await readFile(traceFile, "utf8"))
+        .trim()
+        .split("\n")
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              argv?: string[];
+              codexPath?: string | null;
+              login?: unknown;
+            },
+        );
+      const started = trace.filter((entry) => entry.argv !== undefined);
+      expect(started.length).toBeGreaterThan(0);
+      return {
+        launcher,
+        started,
+        logins: trace.flatMap((entry) =>
+          entry.login === undefined ? [] : [entry.login],
+        ),
+      };
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  test("signs in with the scan API key without saving it", async () => {
+    const { launcher, started, logins } = await signIn({
+      apiKey: "synthetic-scan-key",
+    });
+    expect(logins).toEqual([{ type: "apiKey", apiKey: "synthetic-scan-key" }]);
+    for (const { argv, codexPath } of started) {
+      expect(argv).toEqual([
+        "app-server",
+        "-c",
+        "cli_auth_credentials_store=ephemeral",
+      ]);
+      expect(codexPath).not.toBe(launcher);
+    }
+    // The private launcher is removed once codex-acp exits.
+    const launchers = started.map(({ codexPath }) => dirname(codexPath!));
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (launchers.every((directory) => !existsSync(directory))) break;
+      await Bun.sleep(20);
+    }
+    for (const directory of launchers)
+      expect(existsSync(directory)).toBe(false);
+  });
+
+  test.each([
+    ["without an API key", undefined],
+    ["with an empty API key", ""],
+  ] as const)("keeps the saved sign-in %s", async (_case, apiKey) => {
+    const { launcher, started, logins } = await signIn({
+      ...(apiKey === undefined ? {} : { apiKey }),
+      signedIn: true,
+    });
+    // An ambient OPENAI_API_KEY must not replace the saved sign-in.
+    expect(logins).toEqual([]);
+    for (const { argv, codexPath } of started) {
+      expect(argv).toEqual(["app-server"]);
+      expect(codexPath).toBe(launcher);
+    }
   });
 });
 
