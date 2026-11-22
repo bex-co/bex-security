@@ -2169,9 +2169,12 @@ test("default scan clients use the component scan environment", async () => {
   });
 });
 
-// Bex runs default Codex scans through codex-acp, which speaks the app-server
-// protocol. This fake child implements only `codex exec`, so it cannot answer.
-test.skip.each([
+// Bex runs default Codex scans through codex-acp, which starts
+// `CODEX_CLI_PATH app-server`. The preloaded fixture answers as that child.
+const COMPONENT_APP_SERVER = fileURLToPath(
+  new URL("./fixtures/component-app-server.mjs", import.meta.url),
+);
+test.each([
   ["standard", "api-key"],
   ["deep", "api-key"],
   ["standard", "chatgpt"],
@@ -2220,7 +2223,6 @@ test.skip.each([
       const outcomes = await Promise.allSettled(
         ["first", "second"].map(async (value) => {
           const paths = await fixture();
-          const preload = join(paths.root, "codex.mjs");
           const receipt = join(paths.root, "child.json");
           const environment = {
             ...Object.fromEntries(
@@ -2232,7 +2234,13 @@ test.skip.each([
             CODEX_HOME: join(paths.root, "ambient-home"),
             CODEX_SECURITY_STATE_DIR: join(paths.root, "state"),
             CODEX_CLI_PATH: node,
-            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            NODE_OPTIONS: `--import=${pathToFileURL(COMPONENT_APP_SERVER).href}`,
+            BEX_TEST_COMPLETED_SCAN: join(
+              PLUGIN_ROOT,
+              "examples",
+              "completed-scan",
+            ),
+            BEX_TEST_RECEIPT: receipt,
             SYNTHETIC_COMPONENT: value,
           };
           const original = { ...environment };
@@ -2244,24 +2252,6 @@ test.skip.each([
           await writeFile(
             join(environment.CODEX_HOME, "auth.json"),
             JSON.stringify(storedAuthentication),
-          );
-          await writeFile(
-            preload,
-            [
-              'import { cpSync, existsSync, readFileSync, writeFileSync } from "node:fs";',
-              'import { join } from "node:path";',
-              "for await (const chunk of process.stdin) {}",
-              `const scan = process.env.CODEX_SECURITY_SCAN_DIR; cpSync(${JSON.stringify(join(PLUGIN_ROOT, "examples", "completed-scan"))}, scan, { recursive: true });`,
-              'writeFileSync(join(scan, "report.md"), "# Synthetic scan\\n");',
-              'const manifestPath = join(scan, "scan-manifest.json"); const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));',
-              'manifest.scan.mode = "scoped_path"; writeFileSync(manifestPath, JSON.stringify(manifest));',
-              'const authPath = join(process.env.CODEX_HOME, "auth.json");',
-              `writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ executable: process.execPath, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, key: process.env.CODEX_API_KEY ?? null, auth: existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf8")) : null, value: process.env.SYNTHETIC_COMPONENT, python: process.env.PYTHON, workerConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : null }));`,
-              'console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-thread" }));',
-              'console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "scan complete" } }));',
-              'console.log(JSON.stringify({ type: "turn.completed", usage: null }));',
-              "process.exit(0);",
-            ].join("\n"),
           );
           const summary = await scan(paths, {
             components: [{ name: "Source", paths: ["."] }],
@@ -2287,6 +2277,9 @@ test.skip.each([
             home: join(environment.CODEX_SECURITY_STATE_DIR, "codex-home"),
             state: environment.CODEX_SECURITY_STATE_DIR,
             key: auth === "api-key" ? environment.OPENAI_API_KEY : null,
+            // An API key signs in for this app-server only.
+            login: auth === "api-key" ? environment.OPENAI_API_KEY : null,
+            ephemeral: auth === "api-key",
             auth: auth === "chatgpt" ? storedAuthentication : null,
             value,
             python: "/managed/python",
