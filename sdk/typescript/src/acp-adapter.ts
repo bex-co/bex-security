@@ -1051,6 +1051,20 @@ function nodeLaunch(path: string): AgentLaunch {
   return { command: process.execPath, args: [path] };
 }
 
+/**
+ * codex-acp starts `CODEX_PATH` through cmd.exe on Windows, which cannot run
+ * the namespaced `\\?\` paths that direct spawns use.
+ * @internal
+ */
+export function shellCodexPath(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform !== "win32") return path;
+  if (/^\\\\\?\\UNC\\/iu.test(path)) return `\\\\${path.slice(8)}`;
+  return path.startsWith("\\\\?\\") ? path.slice(4) : path;
+}
+
 /** App-server would otherwise save an API-key login over the shared sign-in. */
 const EPHEMERAL_CREDENTIALS = "-c cli_auth_credentials_store=ephemeral";
 
@@ -1111,8 +1125,10 @@ const CODEX_DRIVER: AcpAgentDriver = {
       (options.config ?? {}) as JsonObject,
     );
     const modelProvider = config["model_provider"];
-    const codexPath =
+    const configuredPath =
       options.codexPathOverride ?? options.env?.["CODEX_CLI_PATH"];
+    const codexPath =
+      configuredPath === undefined ? undefined : shellCodexPath(configuredPath);
     return {
       ...options.env,
       CODEX_CONFIG: JSON.stringify(config),

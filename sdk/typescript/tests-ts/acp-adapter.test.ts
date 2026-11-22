@@ -11,6 +11,7 @@ import {
   AcpCodex,
   pluginMcpServers,
   museEnvironment,
+  shellCodexPath,
   withoutCodexProviderCredentials,
 } from "../src/acp-adapter.js";
 
@@ -554,6 +555,18 @@ describe("ACP adapter", () => {
     ).toEqual({ PATH: "/synthetic/bin" });
   });
 });
+
+test.each([
+  ["\\\\?\\C:\\tools\\node.exe", "C:\\tools\\node.exe"],
+  ["\\\\?\\UNC\\server\\share\\codex.exe", "\\\\server\\share\\codex.exe"],
+  ["C:\\tools\\codex.cmd", "C:\\tools\\codex.cmd"],
+] as const)(
+  "passes cmd.exe a non-namespaced Codex path for %s",
+  (namespaced, expected) => {
+    expect(shellCodexPath(namespaced, "win32")).toBe(expected);
+    expect(shellCodexPath(namespaced, "linux")).toBe(namespaced);
+  },
+);
 
 describe("Codex app-server sign-in", () => {
   // codex-acp runs `CODEX_PATH app-server`, here the synthetic app-server.
