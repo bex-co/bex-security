@@ -488,6 +488,14 @@ function repositoryPathMatcher(repository: string, literal: boolean) {
   };
 }
 
+/** Return the repository-relative form of an absolute path inside the repository. */
+export function repositoryRelativePath(
+  repository: string,
+  path: string,
+): string | null {
+  return repositoryPathMatcher(repository, true)(path);
+}
+
 function literalRepositoryPaths(argv: string[], repository: string): string[] {
   // The shell's -c argument is source text. Its positional arguments are literal.
   const executable = argv[0] ?? "";

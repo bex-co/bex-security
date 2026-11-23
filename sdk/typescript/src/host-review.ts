@@ -21,6 +21,7 @@ import {
 } from "./errors.js";
 import { pathIsWithin } from "./path-scope.js";
 import {
+  repositoryRelativePath,
   scanActivitiesFromEvent,
   scanReviewEvidenceFromEvent,
   type ScanActivity,
@@ -35,6 +36,10 @@ const ASSIGNMENT_ATTEMPTS = 2;
 const BINARY_SAMPLE_BYTES = 8000;
 const CHECKPOINT_SCHEMA_VERSION = 1;
 const UNCOVERED_DEFERRED_ID = "host-review-uncovered-files";
+const CORRECTION_PROMPT = [
+  "Your previous reply in this session did not contain a complete JSON object matching the required schema.",
+  "Do not read, search, or list files again. Return only that JSON object now: reviewedFiles lists the assigned files you read during this assignment, and candidates lists the candidate issues you found, or [] when there are none.",
+].join("\n\n");
 export const DEFAULT_HOST_REVIEW_WORKERS = 16;
 
 interface ScanEvent {
@@ -165,6 +170,10 @@ interface AttemptResult {
   missingFiles: string[];
   candidates: Array<z.infer<typeof candidateSchema>>;
   responseStatus: "none" | "invalid" | "valid";
+  /** Final agent message of each turn, in order, for diagnosing parse failures. */
+  responses: string[];
+  /** True when the first turn's reply was unusable and the host asked once more. */
+  correctionRequested: boolean;
   turnCompleted: boolean;
   failure: string | null;
 }
@@ -714,11 +723,88 @@ async function runAssignment(
         missingFiles: missing,
         candidates: [],
         responseStatus: "none",
+        responses: [],
+        correctionRequested: false,
         turnCompleted: false,
         failure: null,
       };
       let thread: HostReviewThread | undefined;
       let attemptFailed = false;
+      const runTurn = async (
+        input: string,
+      ): Promise<z.infer<typeof assignmentResponseSchema> | null> => {
+        const { events } = await thread!.runStreamed(input, {
+          signal: options.signal,
+          outputSchema: z.toJSONSchema(assignmentResponseSchema, {
+            target: "openapi-3.0",
+          }),
+        });
+        record.phase = "streaming";
+        record.turnCompleted = false;
+        let response: z.infer<typeof assignmentResponseSchema> | null = null;
+        let message: string | null = null;
+        try {
+          for await (const event of events) {
+            options.signal.throwIfAborted();
+            for (const activity of scanActivitiesFromEvent(
+              event,
+              options.repository,
+            )) {
+              options.onActivity?.(activity);
+            }
+            for (const path of scanReviewEvidenceFromEvent(
+              event,
+              options.repository,
+            )) {
+              if (!assigned.has(path)) continue;
+              evidence.add(path);
+              if (!record.readFiles.includes(path)) record.readFiles.push(path);
+            }
+            if (
+              event["type"] === "item.completed" &&
+              isRecord(event["item"]) &&
+              event["item"]["type"] === "agent_message" &&
+              typeof event["item"]["text"] === "string"
+            ) {
+              message = event["item"]["text"];
+              const parsed = assignedResponse(
+                options.repository,
+                assigned,
+                parseAssignmentResponse(message),
+              );
+              if (parsed !== null) {
+                response = parsed;
+                record.responseStatus = "valid";
+                record.claimedFiles = parsed.reviewedFiles.filter((path) =>
+                  assigned.has(path),
+                );
+                record.candidates = parsed.candidates.filter((candidate) =>
+                  assigned.has(candidate.path),
+                );
+              } else if (response === null) {
+                record.responseStatus = "invalid";
+              }
+            } else if (event["type"] === "turn.completed") {
+              record.turnCompleted = true;
+            } else if (event["type"] === "turn.failed") {
+              const error = isRecord(event["error"])
+                ? event["error"]["message"]
+                : null;
+              throw new Error(
+                typeof error === "string" ? error : "ACP review turn failed",
+              );
+            } else if (
+              event["type"] === "error" &&
+              typeof event["message"] === "string"
+            ) {
+              throw new Error(event["message"]);
+            }
+          }
+        } finally {
+          if (message !== null) record.responses.push(message);
+        }
+        return response;
+      };
       try {
         await mkdir(workingDirectory, { recursive: true, mode: 0o700 });
         await saveDiagnostic(options, join(workingDirectory, "request.json"), {
@@ -732,66 +818,25 @@ async function runAssignment(
           skipGitRepoCheck: true,
           approvalPolicy: "never",
         });
-        const { events } = await thread.runStreamed(
+        let response = await runTurn(
           await assignmentPrompt(options.repository, missing),
-          {
-            signal: options.signal,
-            outputSchema: z.toJSONSchema(assignmentResponseSchema, {
-              target: "openapi-3.0",
-            }),
-          },
         );
-        record.phase = "streaming";
-        let response: z.infer<typeof assignmentResponseSchema> | null = null;
-        for await (const event of events) {
-          options.signal.throwIfAborted();
-          for (const activity of scanActivitiesFromEvent(
-            event,
-            options.repository,
-          )) {
-            options.onActivity?.(activity);
-          }
-          for (const path of scanReviewEvidenceFromEvent(
-            event,
-            options.repository,
-          )) {
-            if (!assigned.has(path)) continue;
-            evidence.add(path);
-            if (!record.readFiles.includes(path)) record.readFiles.push(path);
-          }
-          if (
-            event["type"] === "item.completed" &&
-            isRecord(event["item"]) &&
-            event["item"]["type"] === "agent_message" &&
-            typeof event["item"]["text"] === "string"
-          ) {
-            const parsed = parseAssignmentResponse(event["item"]["text"]);
-            if (parsed !== null) {
-              response = parsed;
-              record.responseStatus = "valid";
-              record.claimedFiles = parsed.reviewedFiles.filter((path) =>
-                assigned.has(path),
-              );
-              record.candidates = parsed.candidates.filter((candidate) =>
-                assigned.has(candidate.path),
-              );
-            } else if (response === null) {
-              record.responseStatus = "invalid";
-            }
-          } else if (event["type"] === "turn.completed") {
-            record.turnCompleted = true;
-          } else if (event["type"] === "turn.failed") {
-            const error = isRecord(event["error"])
-              ? event["error"]["message"]
-              : null;
+        // A completed turn can still end with an unusable reply: muse-code-acp
+        // drops message deltas that arrive before it registers the message, so
+        // the start of the JSON is lost. Ask once in the same session instead
+        // of re-reading every assigned file; claims still need read evidence.
+        if (response === null && record.turnCompleted) {
+          record.correctionRequested = true;
+          try {
+            response = await runTurn(CORRECTION_PROMPT);
+          } catch (error) {
+            options.signal.throwIfAborted();
+            // The first turn already failed validation; a correction that cannot
+            // run (for example, an agent that cannot resume sessions) only
+            // leaves this attempt to the normal retry.
             throw new Error(
-              typeof error === "string" ? error : "ACP review turn failed",
+              `ACP review turn returned no valid structured response; the correction turn failed: ${errorMessage(error)}`,
             );
-          } else if (
-            event["type"] === "error" &&
-            typeof event["message"] === "string"
-          ) {
-            throw new Error(event["message"]);
           }
         }
         record.phase = "validating";
@@ -1168,6 +1213,29 @@ function parseAssignmentResponse(
   text: string,
 ): z.infer<typeof assignmentResponseSchema> | null {
   return parseStructuredResponse(text, assignmentResponseSchema);
+}
+
+/** Agents told to read exact absolute paths sometimes report those paths
+ * instead of the assigned repository-relative ones; map them back so the
+ * reads still count and the candidates are kept. */
+function assignedResponse(
+  repository: string,
+  assigned: ReadonlySet<string>,
+  response: z.infer<typeof assignmentResponseSchema> | null,
+): z.infer<typeof assignmentResponseSchema> | null {
+  if (response === null) return null;
+  const assignedPath = (path: string) => {
+    if (assigned.has(path)) return path;
+    const relative = repositoryRelativePath(repository, path);
+    return relative !== null && assigned.has(relative) ? relative : path;
+  };
+  return {
+    reviewedFiles: response.reviewedFiles.map(assignedPath),
+    candidates: response.candidates.map((candidate) => ({
+      ...candidate,
+      path: assignedPath(candidate.path),
+    })),
+  };
 }
 
 function parseStructuredResponse<T>(

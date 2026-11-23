@@ -41,13 +41,16 @@ Before 1.0, minor releases may change the public API.
 ### Install from source
 
 To run from a source checkout instead of the published npm package, install
-both dependency trees before building the bundled plugin and CLI:
+both dependency trees before building the bundled plugin and CLI. The plugin
+build also needs the
+[universal native payload](../../plugins/codex-security/native/README.md#package-inputs)
+in `plugins/codex-security/native/prebuilt`.
 
 ```sh
 git clone https://github.com/bex-co/bex-security.git
 cd bex-security
 pnpm --dir sdk/typescript install --frozen-lockfile
-npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm --dir sdk/typescript run build:plugin
 pnpm --dir sdk/typescript run build
 ./bex-security scan /path/to/repository --agent claude
@@ -235,14 +238,20 @@ saves diagnostics inside the existing scan output directory once the review
 inventory has been generated and validated. Inventory/setup failures happen
 before this assignment-diagnostic stage.
 
-| Artifact                                                               | Contents                                                                                                                              |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `artifacts/01_context/host-review/inventory.json`                      | Registered review inventory.                                                                                                          |
-| `artifacts/01_context/host-review/assignment-N-attempt-M/request.json` | Files requested, saved before agent startup.                                                                                          |
-| `artifacts/01_context/host-review/assignment-N-attempt-M/result.json`  | Attempt phase, completed read evidence, claimed files, response validity, terminal status, unvalidated candidates and failure reason. |
-| `artifacts/01_context/host-review/assignment-N.json`                   | Combined assignment outcome, remaining files and number of attempts.                                                                  |
-| `artifacts/01_context/host-review/incomplete-review.json`              | Partial coverage, missing files, assignment history and unvalidated candidates after failure or cancellation.                         |
-| `incomplete-report.md`                                                 | Readable incomplete-scan summary linking to the diagnostics.                                                                          |
+| Artifact                                                               | Contents                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `artifacts/01_context/host-review/inventory.json`                      | Registered review inventory.                                                                                                                                                                               |
+| `artifacts/01_context/host-review/assignment-N-attempt-M/request.json` | Files requested, saved before agent startup.                                                                                                                                                               |
+| `artifacts/01_context/host-review/assignment-N-attempt-M/result.json`  | Attempt phase, completed read evidence, claimed files, response validity, each turn's final agent message, whether a correction was requested, terminal status, unvalidated candidates and failure reason. |
+| `artifacts/01_context/host-review/assignment-N.json`                   | Combined assignment outcome, remaining files and number of attempts.                                                                                                                                       |
+| `artifacts/01_context/host-review/incomplete-review.json`              | Partial coverage, missing files, assignment history and unvalidated candidates after failure or cancellation.                                                                                              |
+| `incomplete-report.md`                                                 | Readable incomplete-scan summary linking to the diagnostics.                                                                                                                                               |
+
+When a completed review turn ends without a usable JSON response, Bex asks
+once more in the same session for that response instead of re-reading the
+assigned files. The reply still counts only files with completed read evidence.
+Absolute repository paths in a reply count as the assigned repository-relative
+files.
 
 Host reviews that verify at least one file produce `review.json` for the
 coordinator. Files that still lack read evidence after recovery are listed

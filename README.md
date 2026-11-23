@@ -64,13 +64,16 @@ The published npm package already contains the generated security plugin; the
 additional build steps below apply only to a source checkout.
 
 To work from source, clone the repository, install both dependency trees, and
-build the bundled plugin and CLI:
+build the bundled plugin and CLI. Building the plugin also needs the universal
+native payload in `plugins/codex-security/native/prebuilt`; download it from a
+CI run for your commit as described in
+[native package inputs](plugins/codex-security/native/README.md#package-inputs).
 
 ```bash
 git clone https://github.com/bex-co/bex-security.git
 cd bex-security
 pnpm --dir sdk/typescript install --frozen-lockfile
-npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
 pnpm --dir sdk/typescript run build:plugin
 pnpm --dir sdk/typescript run build
 ./bex-security scan /path/to/repository --agent claude

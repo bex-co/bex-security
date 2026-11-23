@@ -286,10 +286,19 @@ describe("host ACP review assignments", () => {
     }
   });
 
-  test.each([
+  test.each<
+    Partial<FakeTurn> & {
+      name: string;
+      correction?: FakeTurn;
+      responseStatus: string;
+      phase: string;
+      reason: string;
+    }
+  >([
     {
       name: "malformed output",
       message: "not JSON",
+      correction: { read: [], claimed: [], message: "still not JSON" },
       responseStatus: "invalid",
       phase: "validating",
       reason: "no valid structured response",
@@ -310,13 +319,14 @@ describe("host ACP review assignments", () => {
     },
   ])(
     "distinguishes $name from missing reads and re-requests unaccepted files",
-    async (scenario) => {
+    async ({ correction, ...scenario }) => {
       const value = await fixture();
       try {
         await runHostReviewAssignments({
           ...reviewOptions(value),
           client: client(value.repository, [
             { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"], ...scenario },
+            ...(correction === undefined ? [] : [correction]),
             { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] },
           ]),
         });
@@ -662,6 +672,139 @@ describe("host ACP review assignments", () => {
       });
 
       expect(result.filesReviewed).toBe(2);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("asks once in the same session for a reply whose JSON start was lost", async () => {
+    const value = await fixture();
+    const prompts: string[] = [];
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        workers: 1,
+        client: client(
+          value.repository,
+          [
+            {
+              read: ["a.ts", "b.ts"],
+              claimed: [],
+              message: 'Reading both files.b.ts"],"candidates":[]}',
+            },
+            { read: [], claimed: ["a.ts", "b.ts"] },
+          ],
+          VALIDATION,
+          prompts,
+        ),
+      });
+
+      expect(result.filesReviewed).toBe(2);
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain("Do not read, search, or list files again");
+      const attempt = await json(
+        join(diagnosticRoot(value), "assignment-1-attempt-1", "result.json"),
+      );
+      expect(attempt).toMatchObject({
+        status: "complete",
+        correctionRequested: true,
+        responseStatus: "valid",
+        readFiles: ["a.ts", "b.ts"],
+      });
+      expect(attempt.responses).toHaveLength(2);
+      expect(attempt.responses[0]).toContain('b.ts"],"candidates"');
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts absolute repository paths for assigned files and candidates", async () => {
+    const value = await fixture();
+    try {
+      const absolute = (path: string) => join(value.repository, path);
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        workers: 1,
+        client: client(value.repository, [
+          {
+            read: ["a.ts", "b.ts"],
+            claimed: [],
+            message: JSON.stringify({
+              reviewedFiles: [absolute("a.ts"), absolute("b.ts")],
+              candidates: [
+                {
+                  title: "Candidate",
+                  path: absolute("a.ts"),
+                  summary: "Validate this data flow.",
+                },
+              ],
+            }),
+          },
+        ]),
+      });
+
+      const artifact = JSON.parse(await readFile(result.artifactPath, "utf8"));
+      expect(artifact.assignments[0]).toMatchObject({
+        attempts: 1,
+        reviewedFiles: ["a.ts", "b.ts"],
+      });
+      expect(artifact.candidates).toEqual([
+        expect.objectContaining({ path: "a.ts" }),
+      ]);
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a correction reply cannot claim files without read evidence", async () => {
+    const value = await fixture();
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        workers: 1,
+        client: client(value.repository, [
+          { read: ["a.ts"], claimed: [], message: "truncated" },
+          { read: [], claimed: ["a.ts", "b.ts"] },
+          { read: ["b.ts"], claimed: ["b.ts"] },
+        ]),
+      });
+
+      const artifact = JSON.parse(await readFile(result.artifactPath, "utf8"));
+      expect(artifact.assignments[0]).toMatchObject({
+        attempts: 2,
+        reviewedFiles: ["a.ts", "b.ts"],
+      });
+    } finally {
+      await rm(value.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a correction turn that cannot start leaves the attempt to the normal retry", async () => {
+    const value = await fixture();
+    try {
+      const result = await runHostReviewAssignments({
+        ...reviewOptions(value),
+        workers: 1,
+        client: client(value.repository, [
+          { read: ["a.ts", "b.ts"], claimed: [], message: "truncated" },
+          {
+            read: [],
+            claimed: [],
+            startError: new ConfigurationError(
+              "Synthetic ACP agent cannot resume sessions.",
+            ),
+          },
+          { read: ["a.ts", "b.ts"], claimed: ["a.ts", "b.ts"] },
+        ]),
+      });
+
+      expect(result.filesReviewed).toBe(2);
+      const first = await json(
+        join(diagnosticRoot(value), "assignment-1-attempt-1", "result.json"),
+      );
+      expect(first.status).toBe("failed");
+      expect(first.failure).toContain("correction turn failed");
+      expect(first.failure).toContain("cannot resume sessions");
     } finally {
       await rm(value.root, { recursive: true, force: true });
     }
