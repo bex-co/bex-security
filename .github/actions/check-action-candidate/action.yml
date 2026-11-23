@@ -20,5 +20,6 @@ runs:
         trap 'rm -rf "$consumer"' EXIT
         printf '%s\n' '{"name":"action-candidate-check","private":true,"type":"module"}' > "$consumer/package.json"
         npm install --prefix "$consumer" --ignore-scripts --include=optional --no-audit --no-fund ./dist/*.tgz
+        name="$(node -p 'require("./sdk/typescript/package.json").name')"
         version="$(node -p 'require("./sdk/typescript/package.json").version')"
-        npm --prefix github-action run test:cli -- "$consumer/node_modules/@openai/codex-security" "$version"
+        npm --prefix github-action run test:cli -- "$consumer/node_modules/$name" "$version"

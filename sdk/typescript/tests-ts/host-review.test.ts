@@ -1152,7 +1152,8 @@ describe("host candidate validation", () => {
       expect(await json(result.artifactPath)).toMatchObject({
         candidates: [{ path: "a.ts", hostValidation: null }],
       });
-      expect(warnings).toEqual([
+      // Votes run concurrently, so their warnings can arrive in either order.
+      expect(warnings.toSorted()).toEqual([
         expect.stringContaining(
           "Host validation vote 1 for candidate 1 failed",
         ),

@@ -488,7 +488,9 @@ testing, and cleanup instructions. This works for standard and diff scans;
 Deep scans do not support it. See [custom validation](sdk/typescript/docs/cli.md#custom-validation).
 For a runnable local example, see the [custom validation demo](examples/custom-validation/README.md).
 Environment API keys are passed directly to the current scan and are never
-stored in Codex's credential home or system keyring.
+stored in Codex's credential home or system keyring. With `--agent codex`,
+`codex-acp` signs its app-server in with the key and keeps that sign-in in
+memory, so a saved ChatGPT sign-in stays untouched.
 
 After showing the findings summary, interactive scans with findings ask whether
 to open a finding browser where you can inspect full details, choose a severity

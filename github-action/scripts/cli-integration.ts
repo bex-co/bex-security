@@ -20,7 +20,10 @@ const cliPackage = candidatePackage === undefined
   ? resolve(import.meta.dirname, '../runtime/node_modules/@openai/codex-security')
   : resolve(candidatePackage);
 const installed = JSON.parse(await readFile(join(cliPackage, 'package.json'), 'utf8'));
-assert.equal(installed.name, '@openai/codex-security');
+// A release candidate is this repository's packed CLI, which may be published under another name.
+const candidateName = candidatePackage === undefined ? undefined : JSON.parse(
+  await readFile(resolve(import.meta.dirname, '../../sdk/typescript/package.json'), 'utf8')).name;
+assert.equal(installed.name, candidateName ?? '@openai/codex-security');
 assert.equal(installed.version, candidateVersion ?? runtimeManifest.dependencies['@openai/codex-security']);
 const cli = join(cliPackage, 'bin/codex-security.mjs');
 const root = await mkdtemp(join(await realpath(tmpdir()), 'codex-action-cli-test-'));
@@ -172,7 +175,11 @@ try {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     const endpoint = `http://127.0.0.1:${address.port}`;
-    for (const provider of ['openai', 'amazon-bedrock']) {
+    // A renamed fork CLI runs these scans through codex-acp. It does not forward
+    // the native thread source, and on Linux an interrupted app-server can leave
+    // sandbox mount targets such as /tmp/.git that break the checks below.
+    const attributionProviders = installed.name === '@openai/codex-security' ? ['openai', 'amazon-bedrock'] : [];
+    for (const provider of attributionProviders) {
       requests.length = 0;
       const requestHome = join(root, `request-${provider}`);
       const codexHome = join(requestHome, '.codex');
