@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Codex, CodexOptions } from "@openai/codex-sdk";
+import { Codex, type CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import { configuredCodexHome } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
@@ -177,6 +177,19 @@ export async function restoreProviderProfile(
       ? { model_providers: providers as JsonObject | null }
       : {}),
   };
+}
+
+/** Use native Codex exec for Codex-only features that codex-acp does not forward. */
+export async function createNativeCodex(options: CodexOptions): Promise<Codex> {
+  const { command, environment } = await nativeCodexLaunch(
+    options.codexPathOverride ?? resolveCodexCommand(options.env).command,
+    options.env,
+  );
+  return new Codex({
+    ...options,
+    codexPathOverride: executablePathForSpawn(command),
+    env: environment,
+  });
 }
 
 /** The pinned SDK lacks the native CLI's private profile-file option. */

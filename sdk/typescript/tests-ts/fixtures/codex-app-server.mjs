@@ -82,12 +82,31 @@ const handlers = {
   }),
   "turn/start": () => {
     const turn = { id: "app-server-turn", items: [], status: "inProgress" };
+    const turnError = process.env.BEX_TEST_APP_SERVER_TURN_ERROR
+      ? JSON.parse(process.env.BEX_TEST_APP_SERVER_TURN_ERROR)
+      : null;
     setTimeout(() => {
       notify("turn/started", { threadId: thread.id, turn });
-      notify("turn/completed", {
-        threadId: thread.id,
-        turn: { ...turn, status: "completed" },
-      });
+      if (turnError !== null) {
+        notify("turn/completed", {
+          threadId: thread.id,
+          turn: {
+            ...turn,
+            status: "failed",
+            error: {
+              message: turnError.message,
+              codexErrorInfo: turnError.codexErrorInfo ?? null,
+              additionalDetails: turnError.additionalDetails ?? null,
+              misalignment: null,
+            },
+          },
+        });
+      } else {
+        notify("turn/completed", {
+          threadId: thread.id,
+          turn: { ...turn, status: "completed" },
+        });
+      }
     }, 5);
     return { turn };
   },

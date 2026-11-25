@@ -49,6 +49,7 @@ import {
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
+  createNativeCodex,
   createProfileCodex,
   createProviderProfile,
   preflightReadOnlyProfileCodex,
@@ -854,14 +855,18 @@ async function startReadOnlyCodexThread(
         ...environment,
       };
     }
+    const nativeCyberAccess =
+      options.cyberAccessProgram !== undefined || sdkConfig["daybreak"] === true;
     const codex =
-      profile === undefined
-        ? new AcpCodex(codexOptions)
-        : await createProfileCodex(
+      profile !== undefined
+        ? await createProfileCodex(
             codexOptions,
             profile.name,
             requestedPermissionProfile,
-          );
+          )
+        : nativeCyberAccess
+          ? await createNativeCodex(codexOptions)
+          : new AcpCodex(codexOptions);
     return {
       thread: codex.startThread(threadOptions),
       ...(ownProfile === undefined ? {} : { cleanup: ownProfile.cleanup }),

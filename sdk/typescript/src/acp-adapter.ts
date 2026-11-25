@@ -471,6 +471,15 @@ export class AcpAgentThread {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {
         session: { configOptions: { boolean: {} } },
+        ...(this.#driver.name === "codex"
+          ? {
+              _meta: {
+                jetbrains: {
+                  air: { version: 1, capabilities: ["sessionFailure"] },
+                },
+              },
+            }
+          : {}),
       },
       clientInfo: {
         name: "bex-security",
@@ -734,7 +743,13 @@ export class AcpEventAdapter {
       });
     }
     this.#messages.clear();
-    if (response.stopReason === "end_turn") {
+    const sessionFailure = responseSessionFailure(response);
+    if (sessionFailure !== null) {
+      events.push({
+        type: "turn.failed",
+        error: { message: sessionFailure },
+      });
+    } else if (response.stopReason === "end_turn") {
       events.push({
         type: "turn.completed",
         usage: threadUsage(response.usage) as never,
@@ -774,6 +789,20 @@ export class AcpEventAdapter {
     current.started = true;
     return [event];
   }
+}
+
+function responseSessionFailure(response: PromptResponse): string | null {
+  const air = record(record(record(response._meta)?.["jetbrains"])?.["air"]);
+  const failure = record(air?.["sessionFailure"]);
+  if (failure === null || failure["severity"] !== "error") return null;
+  const title =
+    typeof failure["title"] === "string" ? failure["title"].trim() : "";
+  const details =
+    typeof failure["details"] === "string" ? failure["details"].trim() : "";
+  if (title !== "" && details !== "" && !title.includes(details)) {
+    return `${title}: ${details}`;
+  }
+  return title || details || "ACP agent reported a turn failure.";
 }
 
 async function configureSession(

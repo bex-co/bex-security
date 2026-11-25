@@ -54,6 +54,7 @@ import {
   VerificationModeSchema,
 } from "./remediation.js";
 import {
+  createNativeCodex,
   createProfileCodex,
   createProviderProfile,
   privateReplayOverrides,
@@ -395,6 +396,7 @@ interface PreparedRuntime {
 interface PreparedSession {
   toolRoots: readonly string[];
   pricingContext?: ScanPricingContext;
+  cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
   safetyIdentifier?: string;
   runtime: PreparedRuntime;
   runtimeHome: string;
@@ -801,7 +803,10 @@ interface ClientDependencies {
   };
   now?: () => number;
   createCodex(
-    options: CodexOptions & { nativeProfile?: string },
+    options: CodexOptions & {
+      nativeProfile?: string;
+      nativeCyberAccess?: boolean;
+    },
     selection?: AcpAgentSelection,
   ): CodexClientLike | Promise<CodexClientLike>;
   environment: ProcessEnvironment;
@@ -825,13 +830,24 @@ interface ClientDependencies {
 
 /** @internal */
 export const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  // Every agent runs through ACP. A native provider profile is a Codex-only
-  // upstream feature, so Codex with a profile uses the profile-aware client.
-  createCodex: ({ nativeProfile, ...options }, selection) =>
-    nativeProfile === undefined ||
-    (selection !== undefined && selection.agent !== "codex")
-      ? new AcpAgentClient(options, selection)
-      : createProfileCodex(options, nativeProfile),
+  // Every agent runs through ACP, except Codex-only features that codex-acp
+  // does not forward: private provider profiles and explicit Daybreak / Cyber
+  // access program selection.
+  createCodex: (
+    { nativeProfile, nativeCyberAccess, ...options },
+    selection,
+  ) => {
+    if (selection !== undefined && selection.agent !== "codex") {
+      return new AcpAgentClient(options, selection);
+    }
+    if (nativeProfile !== undefined) {
+      return createProfileCodex(options, nativeProfile);
+    }
+    if (nativeCyberAccess === true) {
+      return createNativeCodex(options);
+    }
+    return new AcpAgentClient(options, selection);
+  },
   environment: process.env,
 };
 
@@ -5282,7 +5298,14 @@ export class CodexSecurity {
           }
         : {}),
     };
-    const codexOptions: CodexOptions & { nativeProfile?: string } = {
+    const nativeCyberAccess =
+      agent === "codex" &&
+      (session.cyberAccessProgram !== undefined ||
+        sdkCodexConfig["daybreak"] === true);
+    const codexOptions: CodexOptions & {
+      nativeProfile?: string;
+      nativeCyberAccess?: boolean;
+    } = {
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
@@ -5292,6 +5315,7 @@ export class CodexSecurity {
       ...(agent !== "codex" || runtime.providerProfile === undefined
         ? {}
         : { nativeProfile: runtime.providerProfile.name }),
+      ...(nativeCyberAccess ? { nativeCyberAccess: true } : {}),
       configOverrides: [...configOverrides, requestContext.configOverride],
       env: sdkEnvironment,
       config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
@@ -5628,6 +5652,7 @@ export class CodexSecurity {
       checkOpen();
       return {
         runtime,
+        cyberAccessProgram: options.cyberAccessProgram,
         safetyIdentifier: options.safetyIdentifier,
         toolRoots: protectedRoots,
         runtimeHome,

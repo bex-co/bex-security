@@ -3,8 +3,10 @@ import { tmpdir } from "node:os";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
+import { DEFAULT_DEPENDENCIES } from "../src/api.js";
+import * as providerProfiles from "../src/provider-profile.js";
 import { ConfigurationError } from "../src/errors.js";
 import {
   AcpAgentClient,
@@ -684,6 +686,47 @@ describe("Codex app-server sign-in", () => {
       expect(codexPath).toBe(launcher);
     }
   });
+
+  test("surfaces failed turn policy errors instead of ending the turn silently", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bex-app-server-failure-"));
+    try {
+      const codexHome = join(root, "codex-home");
+      await mkdir(codexHome);
+      const launcher = await appServerLauncher(root);
+      const client = agentClient(
+        {
+          codexPathOverride: launcher,
+          env: {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(([key]) =>
+                /^(path|pathext|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(
+                  key,
+                ),
+              ),
+            ),
+            CODEX_HOME: codexHome,
+            BEX_TEST_APP_SERVER_SIGNED_IN: "1",
+            BEX_TEST_APP_SERVER_TURN_ERROR: JSON.stringify({
+              message:
+                "Synthetic content was flagged for possible cybersecurity risk.",
+              codexErrorInfo: "cyber_policy",
+            }),
+          },
+        },
+        { agent: "codex" },
+      );
+      const thread = client.startThread({
+        workingDirectory: root,
+        skipGitRepoCheck: true,
+      });
+      await expect(thread.run("scan the repository")).rejects.toThrow(
+        "Synthetic content was flagged for possible cybersecurity risk.",
+      );
+      await client.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Muse session configuration", () => {
@@ -876,5 +919,29 @@ test("Muse invalid model errors retain the protocol cause for review classificat
       code: -32602,
       data: { failure: { execution: "notSubmitted" } },
     });
+  }
+});
+
+test("DEFAULT_DEPENDENCIES uses native Codex for explicit Daybreak or Cyber access", async () => {
+  const nativeClient = { startThread: () => ({ id: null, runStreamed: async () => ({ events: (async function* () {})() }) }) };
+  const spy = spyOn(providerProfiles, "createNativeCodex").mockResolvedValue(
+    nativeClient as never,
+  );
+  try {
+    const codexClient = await DEFAULT_DEPENDENCIES.createCodex(
+      { nativeCyberAccess: true, config: { daybreak: true } },
+      { agent: "codex" },
+    );
+    expect(codexClient).toBe(nativeClient as never);
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    const claudeClient = await DEFAULT_DEPENDENCIES.createCodex(
+      { nativeCyberAccess: true, config: { daybreak: true } },
+      { agent: "claude" },
+    );
+    expect(claudeClient).toBeInstanceOf(AcpAgentClient);
+    expect(spy).toHaveBeenCalledTimes(1);
+  } finally {
+    spy.mockRestore();
   }
 });

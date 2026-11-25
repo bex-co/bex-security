@@ -3546,7 +3546,9 @@ def test_identity_migration_merges_partially_sequenced_completion_history(
         pytest.param("pre-release", marks=pytest.mark.cross_platform),
         pytest.param(
             "linux-v3",
-            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux generation conversion"),
+            marks=pytest.mark.skipif(
+                sys.platform not in ("linux", "darwin"), reason="POSIX v3 generation conversion"
+            ),
         ),
     ],
 )

@@ -483,7 +483,7 @@ def test_repository_findings_match_directory_aliases_after_exact_paths(
     result = workbench_api["native_indexes"].list_global_findings(
         connection, query_args(repository=str(alias))
     )
-    available = not stale_exact and (not device_changed or sys.platform == "linux")
+    available = not stale_exact and (not device_changed or sys.platform in ("linux", "darwin"))
     assert result["projectionAvailable"] is available
     assert [item["scanId"] for item in result["findings"]] == (
         [SCAN_IDS[selected]] if available else []

@@ -104,19 +104,37 @@ function fakeCodex(response: unknown, ...responses: unknown[]) {
   return { codex, calls };
 }
 
+const activeNativeSpies: { mockRestore(): void }[] = [];
+afterEach(() => {
+  while (activeNativeSpies.length > 0) activeNativeSpies.pop()!.mockRestore();
+});
+
 function observeCodexOptions(
   codex: NonNullable<ScanComparisonOptions["codex"]>,
   observe: (options: CodexOptions) => void,
 ) {
-  return spyOn(AcpCodex.prototype, "startThread").mockImplementation(function (
-    this: AcpCodex,
-    options,
-  ) {
-    observe((this as unknown as { options: CodexOptions }).options);
-    return codex.startThread(options!) as unknown as ReturnType<
-      AcpCodex["startThread"]
-    >;
-  });
+  while (activeNativeSpies.length > 0) activeNativeSpies.pop()!.mockRestore();
+  const startThread = spyOn(AcpCodex.prototype, "startThread").mockImplementation(
+    function (this: AcpCodex, options) {
+      observe((this as unknown as { options: CodexOptions }).options);
+      return codex.startThread(options!) as unknown as ReturnType<
+        AcpCodex["startThread"]
+      >;
+    },
+  );
+  const native = spyOn(providerProfiles, "createNativeCodex").mockImplementation(
+    async (options) =>
+      ({
+        startThread(threadOptions: ThreadOptions) {
+          return startThread.call(
+            { options } as unknown as AcpCodex,
+            threadOptions,
+          );
+        },
+      }) as never,
+  );
+  activeNativeSpies.push(native);
+  return startThread;
 }
 
 function captureProfileClient() {

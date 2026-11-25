@@ -255,6 +255,57 @@ def same_repository_worktree(before: Path, after: Path) -> bool:
     )
 
 
+_TRANSIENT_DEVICE_PLATFORMS = ("linux", "darwin")
+
+
+class _DarwinAttrList(ctypes.Structure):
+    _fields_ = (
+        ("bitmapcount", ctypes.c_uint16),
+        ("reserved", ctypes.c_uint16),
+        ("commonattr", ctypes.c_uint32),
+        ("volattr", ctypes.c_uint32),
+        ("dirattr", ctypes.c_uint32),
+        ("fileattr", ctypes.c_uint32),
+        ("forkattr", ctypes.c_uint32),
+    )
+
+
+def _darwin_volume_uuid(path: Path) -> str | None:
+    attrlist = _DarwinAttrList(5, 0, 0, 0x80000000 | 0x00040000, 0, 0, 0)
+    buffer = ctypes.create_string_buffer(20)
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        getattrlist = libc.getattrlist
+        getattrlist.argtypes = (
+            ctypes.c_char_p,
+            ctypes.POINTER(_DarwinAttrList),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_uint,
+        )
+        getattrlist.restype = ctypes.c_int
+        status = getattrlist(os.fsencode(path), ctypes.byref(attrlist), buffer, len(buffer), 0)
+    except (AttributeError, OSError):
+        return None
+    if status != 0:
+        return None
+    raw = buffer.raw
+    if int.from_bytes(raw[:4], sys.byteorder) < 20:
+        return None
+    return raw[4:20].hex()
+
+
+def _filesystem_identity(path: Path) -> int | str | None:
+    if sys.platform == "linux":
+        try:
+            return os.statvfs(path).f_fsid
+        except OSError:
+            return None
+    if sys.platform == "darwin":
+        return _darwin_volume_uuid(path)
+    return None
+
+
 def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | None:
     target = Path(target)
     location = _repository_worktree_location(target)
@@ -289,20 +340,21 @@ def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | 
     )
     previous_value = None
     value = _identity_digest(material)
-    if sys.platform == "linux":
-        try:
-            common_filesystem = os.statvfs(common_directory).f_fsid
-            object_filesystem = os.statvfs(object_directory).f_fsid
-        except OSError:
-            return None
-        previous_value = value
-        value = _identity_digest(
-            f"git-generation-v3\0{canonical_directory}\0{common_filesystem}\0{inode}\0"
-            f"{birth_time_ns}\0{object_directory}\0{object_filesystem}\0"
-            f"{serialize_filesystem_identity(object_metadata.st_ino)}\0"
-            f"{object_birth_time_ns}\0{relative}",
-            "repository_v3_sha256_",
-        )
+    if sys.platform in _TRANSIENT_DEVICE_PLATFORMS:
+        common_filesystem = _filesystem_identity(common_directory)
+        object_filesystem = _filesystem_identity(object_directory)
+        if common_filesystem is None or object_filesystem is None:
+            if sys.platform == "linux":
+                return None
+        else:
+            previous_value = value
+            value = _identity_digest(
+                f"git-generation-v3\0{canonical_directory}\0{common_filesystem}\0{inode}\0"
+                f"{birth_time_ns}\0{object_directory}\0{object_filesystem}\0"
+                f"{serialize_filesystem_identity(object_metadata.st_ino)}\0"
+                f"{object_birth_time_ns}\0{relative}",
+                "repository_v3_sha256_",
+            )
     return GitRepositoryIdentity(
         value,
         relative,
@@ -500,7 +552,7 @@ def _inspect_repository_target(
                 recorded_owner = True
                 if not stored_filesystem_identity_matches(device, metadata.st_dev):
                     strict_owner_matches = False
-                    mismatch = mismatch or sys.platform != "linux"
+                    mismatch = mismatch or sys.platform not in _TRANSIENT_DEVICE_PLATFORMS
                 if not stored_filesystem_identity_matches(inode, metadata.st_ino):
                     mismatch = True
                     strict_owner_matches = False
@@ -771,7 +823,7 @@ def require_scan_checkout_owner(connection: sqlite3.Connection, scan: sqlite3.Ro
 
 def upgrade_linux_repository_generations(connection: sqlite3.Connection) -> None:
     """Convert only old digests authenticated before their device evidence changes."""
-    if sys.platform != "linux":
+    if sys.platform not in _TRANSIENT_DEVICE_PLATFORMS:
         return
     targets = connection.execute(
         "SELECT id, current_path, repository_identity FROM security_targets "

@@ -2936,6 +2936,8 @@ def change_repository_metadata(
             return ChangedMetadata(result, "st_ino")
         return result
 
+    original_darwin_uuid = target_state._darwin_volume_uuid
+
     def filesystem(path: Path) -> Any:
         result = original_statvfs(path) if original_statvfs else SimpleNamespace(f_fsid=1)
         return (
@@ -2944,6 +2946,16 @@ def change_repository_metadata(
             and Path(path) == (objects if change == "filesystem" else repository / ".git")
             else result
         )
+
+    def darwin_volume_uuid(path: Path) -> str | None:
+        result = original_darwin_uuid(path)
+        if (
+            result is not None
+            and change in ("filesystem", "common-filesystem")
+            and Path(path) == (objects if change == "filesystem" else repository / ".git")
+        ):
+            return f"{result}-changed"
+        return result
 
     def birth(path: str, value: Any) -> int | None:
         result = original_birth(path, value)
@@ -2955,6 +2967,7 @@ def change_repository_metadata(
 
     monkeypatch.setattr(Path, "stat", metadata)
     monkeypatch.setattr(target_state.os, "statvfs", filesystem, raising=False)
+    monkeypatch.setattr(target_state, "_darwin_volume_uuid", darwin_volume_uuid)
     monkeypatch.setattr(target_state, "_repository_birth_time_ns", birth)
 
 
@@ -3029,9 +3042,9 @@ def test_repository_history_distinguishes_linux_remount_from_replacement(
         changes = connection.total_changes
         preserved = (
             change in ("device", "legacy-device", "stored-legacy-device")
-            and sys.platform == "linux"
+            and sys.platform in ("linux", "darwin")
             or change in ("filesystem", "common-filesystem")
-            and sys.platform != "linux"
+            and sys.platform not in ("linux", "darwin")
         )
         assert [row["scanId"] for row in history.list_scans(connection, args)["scans"]] == (
             [scan["scanId"]] if preserved else []
@@ -3165,7 +3178,7 @@ def test_repository_generation_migration_preserves_null_history(
             registration = target_state.register_security_target(connection, str(repository))
             assert registration.target_id == target_id
             assert registration.repository_generation == identity.value
-            if sys.platform == "linux":
+            if sys.platform in ("linux", "darwin"):
                 change_repository_metadata(monkeypatch, repository, "device")
             scope = target_state.RepositoryIdentityCache(connection).scope(target_id)
             assert scope.available
@@ -3233,9 +3246,9 @@ def test_repository_generation_migration_is_atomic_and_preserves_shared_history(
                 else sqlite3.SQLITE_OK
             )
 
-        # Only Linux converts the v2 format; other platforms still record the
-        # semantic migration without changing their existing generations.
-        if sys.platform == "linux":
+        # Only Linux and macOS convert the v2 format; other platforms still record
+        # the semantic migration without changing their existing generations.
+        if sys.platform in ("linux", "darwin"):
             connection.set_authorizer(deny_generation_update)
             with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
                 workbench.apply_migrations(connection)
@@ -3419,7 +3432,7 @@ def test_repository_generation_returns_after_offline_migration(
         assert {
             row[0] for row in connection.execute("SELECT repository_generation FROM scans")
         } == ({identity.value, None} if alias_binding == "legacy" else {identity.value})
-        if sys.platform == "linux":
+        if sys.platform in ("linux", "darwin"):
             change_repository_metadata(monkeypatch, repository, "device")
         updated = connection.execute("SELECT * FROM scans WHERE id=?", (scan["scanId"],)).fetchone()
         target_state.require_scan_checkout_owner(connection, updated)
